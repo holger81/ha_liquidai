@@ -10,7 +10,7 @@ Use this integration as the **TTS** stage in a Home Assistant Assist pipeline wh
 
 ## Install the integration
 
-1. Copy `custom_components/liquidai_tts/` into your HA `config/custom_components/` directory, or run:
+1. Copy `custom_components/ha_liquidai_custom/` into your HA `config/custom_components/` directory, or run:
 
    ```bash
    HA_CONFIG=/path/to/ha/config ./scripts/deploy_to_ha.sh
@@ -30,7 +30,7 @@ Use this integration as the **TTS** stage in a Home Assistant Assist pipeline wh
    |-------|----------|
    | Speech-to-text | Webhook STT (n8n `/webhook/stt`) |
    | Conversation | Webhook Conversation (n8n `/webhook/agent`, **streaming ON**) |
-   | Text-to-speech | **LiquidAI TTS** (`tts.liquidai_tts`) |
+   | Text-to-speech | **LiquidAI TTS** (`tts.ha_liquidai_custom`) |
 
 4. Remove or disable the old **Webhook TTS** sub-entry if it is still selected.
 5. Keep agent timeout as configured in n8n; TTS timeout defaults to **120 s** per synthesis request.
@@ -49,7 +49,7 @@ Use this integration as the **TTS** stage in a Home Assistant Assist pipeline wh
 | Symptom | Check |
 |---------|--------|
 | No audio | LiquidAI URL from HA host, firewall, `scripts/smoke_test_tts.py` |
-| Long delay before speech | Conversation streaming enabled in n8n; TTS entity is `liquidai_tts` not webhook TTS |
+| Long delay before speech | Conversation streaming enabled in n8n; TTS entity is `ha_liquidai_custom` not webhook TTS |
 | Choppy playback | Tune **Advanced** options (keep edge, chunk gap) under integration settings |
 | Tool calls delay speech | Normal — streaming TTS starts after text deltas begin |
 

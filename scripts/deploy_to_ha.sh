@@ -21,9 +21,9 @@ if [[ -z "${HA_CONFIG}" || ! -d "${HA_CONFIG}" ]]; then
   exit 1
 fi
 
-TARGET="${HA_CONFIG}/custom_components/liquidai_tts"
+TARGET="${HA_CONFIG}/custom_components/ha_liquidai_custom"
 mkdir -p "${HA_CONFIG}/custom_components"
-rsync -av --delete "${ROOT_DIR}/custom_components/liquidai_tts/" "${TARGET}/"
+rsync -av --delete "${ROOT_DIR}/custom_components/ha_liquidai_custom/" "${TARGET}/"
 
-echo "Deployed liquidai_tts to ${TARGET}"
+echo "Deployed ha_liquidai_custom to ${TARGET}"
 echo "Restart Home Assistant to load the integration."

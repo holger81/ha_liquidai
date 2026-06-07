@@ -2,7 +2,7 @@
 
 from logging import Logger, getLogger
 
-DOMAIN = "liquidai_tts"
+DOMAIN = "ha_liquidai_custom"
 
 CONF_BASE_URL = "base_url"
 CONF_SYSTEM_PROMPT = "system_prompt"

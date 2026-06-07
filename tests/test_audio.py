@@ -10,19 +10,21 @@ from pathlib import Path
 
 import pytest
 
-COMPONENT = Path(__file__).resolve().parents[1] / "custom_components" / "liquidai_tts"
+COMPONENT = (
+    Path(__file__).resolve().parents[1] / "custom_components" / "ha_liquidai_custom"
+)
 
 
 def _load_component_module(name: str):
-    """Load a liquidai_tts submodule without importing Home Assistant."""
-    module_name = f"liquidai_tts.{name}"
+    """Load a ha_liquidai_custom submodule without importing Home Assistant."""
+    module_name = f"ha_liquidai_custom.{name}"
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    if "liquidai_tts" not in sys.modules:
-        package = types.ModuleType("liquidai_tts")
+    if "ha_liquidai_custom" not in sys.modules:
+        package = types.ModuleType("ha_liquidai_custom")
         package.__path__ = [str(COMPONENT)]  # type: ignore[attr-defined]
-        sys.modules["liquidai_tts"] = package
+        sys.modules["ha_liquidai_custom"] = package
 
     path = COMPONENT / f"{name}.py"
     spec = importlib.util.spec_from_file_location(module_name, path)

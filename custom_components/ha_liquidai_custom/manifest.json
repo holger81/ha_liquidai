@@ -1,5 +1,5 @@
 {
-  "domain": "liquidai_tts",
+  "domain": "ha_liquidai_custom",
   "name": "LiquidAI TTS",
   "codeowners": ["@holger81"],
   "config_flow": true,

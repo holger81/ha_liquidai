@@ -1,6 +1,6 @@
 # Migration from n8n webhook TTS
 
-This guide moves **TTS only** from the n8n hybrid workflow to the native `liquidai_tts` integration. Agent and STT stay on n8n.
+This guide moves **TTS only** from the n8n hybrid workflow to the native `ha_liquidai_custom` integration. Agent and STT stay on n8n.
 
 ## Before
 
@@ -11,14 +11,14 @@ Assist → STT (n8n) → Agent (n8n) → TTS (n8n /webhook/tts) → LiquidAI
 ## After
 
 ```
-Assist → STT (n8n) → Agent (n8n) → TTS (HA liquidai_tts) → LiquidAI
+Assist → STT (n8n) → Agent (n8n) → TTS (HA ha_liquidai_custom) → LiquidAI
 ```
 
 ## Steps
 
 ### 1. Deploy the integration
 
-Follow [assist-setup.md](./assist-setup.md) to install and configure `liquidai_tts` in Home Assistant.
+Follow [assist-setup.md](./assist-setup.md) to install and configure `ha_liquidai_custom` in Home Assistant.
 
 ### 2. Switch the Assist pipeline
 
@@ -49,7 +49,7 @@ In [ha_liquidai_n8n](https://github.com/holger81/ha_liquidai_n8n):
 
 ## Behaviour differences
 
-| Topic | n8n TTS | HA liquidai_tts |
+| Topic | n8n TTS | HA ha_liquidai_custom |
 |-------|---------|-----------------|
 | Latency | Waits for full agent reply + batch synthesis | Streams per sentence during agent output |
 | Long text | Parallel chunk synthesis, merged WAV | Same merge logic for 1-shot; stream for Assist |

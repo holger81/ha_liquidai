@@ -29,7 +29,7 @@ Replaces the n8n `/webhook/tts` path from [ha_liquidai_n8n](https://github.com/h
 HA_CONFIG=/path/to/ha/config ./scripts/deploy_to_ha.sh
 ```
 
-Or copy `custom_components/liquidai_tts/` into `config/custom_components/`, then restart Home Assistant.
+Or copy `custom_components/ha_liquidai_custom/` into `config/custom_components/`, then restart Home Assistant.
 
 ### HACS
 
@@ -50,7 +50,7 @@ Add this repository as a custom integration repository, then install **LiquidAI 
 ```yaml
 action: tts.speak
 target:
-  entity_id: tts.liquidai_tts
+  entity_id: tts.ha_liquidai_custom
 data:
   message: "Hello from LiquidAI."
   media_player_entity_id: media_player.kitchen

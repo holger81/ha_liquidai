@@ -32,7 +32,7 @@ flowchart TB
   subgraph HA["Home Assistant Assist"]
     STT["STT: webhook STT (n8n)"]
     Agent["Conversation: webhook agent (n8n, stream ON)"]
-    TTS["TTS: liquidai_tts (this repo)"]
+    TTS["TTS: ha_liquidai_custom (this repo)"]
     Pipe["Assist pipeline"]
   end
 
@@ -57,7 +57,7 @@ flowchart TB
 sequenceDiagram
   participant Pipe as Assist pipeline
   participant Agent as n8n agent (text stream)
-  participant TTS as liquidai_tts
+  participant TTS as ha_liquidai_custom
   participant LAI as LiquidAI /v1/tts
 
   Agent-->>Pipe: text deltas
@@ -80,7 +80,7 @@ ha_liquidai/
 ├── PLAN.md                          # this file
 ├── hacs.json                        # Phase 4 — HACS metadata
 ├── custom_components/
-│   └── liquidai_tts/
+│   └── ha_liquidai_custom/
 │       ├── __init__.py              # config entry setup
 │       ├── manifest.json
 │       ├── const.py                 # defaults, domain
@@ -108,14 +108,14 @@ ha_liquidai/
 **Deliverables**
 
 - [ ] Init git repo in `~/Projects/ha_liquidai`
-- [ ] Add `manifest.json` skeleton (`domain: liquidai_tts`, version `0.1.0`)
+- [ ] Add `manifest.json` skeleton (`domain: ha_liquidai_custom`, version `0.1.0`)
 - [ ] Document env defaults in `const.py`:
   - `DEFAULT_URL = "http://192.168.10.31:8811"`
   - `DEFAULT_SYSTEM_PROMPT = "Perform TTS. Use the US female voice."`
   - `MAX_CHUNK_LEN = 160`, `KEEP_EDGE_MS = 100`, `CHUNK_GAP_MS = 5`
   - `SILENCE_THRESHOLD = 350`, `DEFAULT_SAMPLE_RATE = 24000`
 
-**Exit criteria:** `custom_components/liquidai_tts/` loads in HA without errors (empty TTS stub).
+**Exit criteria:** `custom_components/ha_liquidai_custom/` loads in HA without errors (empty TTS stub).
 
 ---
 
@@ -150,7 +150,7 @@ ha_liquidai/
      - return `("wav", bytes)`
 
 5. **Manual install script** (`scripts/deploy_to_ha.sh`)
-   - Copy `custom_components/liquidai_tts` → HA `config/custom_components/`
+   - Copy `custom_components/ha_liquidai_custom` → HA `config/custom_components/`
    - Restart HA (document manual step)
 
 **HA setup (test without streaming)**
@@ -158,7 +158,7 @@ ha_liquidai/
 - Settings → Voice assistants → pipeline:
   - STT: unchanged (webhook STT / n8n)
   - Conversation: unchanged (webhook agent / n8n, streaming ON)
-  - **TTS: `liquidai_tts`** (replace webhook TTS sub-entry)
+  - **TTS: `ha_liquidai_custom`** (replace webhook TTS sub-entry)
 
 **Exit criteria**
 
@@ -255,7 +255,7 @@ ha_liquidai/
 - [ ] `hacs.json` + GitHub release tags
 - [ ] `translations/en.json` for config flow
 - [ ] Icon/brands PR to home-assistant/brands (optional)
-- [ ] CI: `hassfest` + `ruff` on `custom_components/liquidai_tts/`
+- [ ] CI: `hassfest` + `ruff` on `custom_components/ha_liquidai_custom/`
 
 ---
 
@@ -347,4 +347,4 @@ Week 2
 
 ## Next action
 
-Start **Phase 0 + Phase 1**: scaffold `custom_components/liquidai_tts/` and implement `async_get_tts_audio` with a manual deploy to your HA instance before touching streaming.
+Start **Phase 0 + Phase 1**: scaffold `custom_components/ha_liquidai_custom/` and implement `async_get_tts_audio` with a manual deploy to your HA instance before touching streaming.

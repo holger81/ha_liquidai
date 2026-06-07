@@ -13,15 +13,15 @@ import aiohttp
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "custom_components"))
 
-from liquidai_tts.audio import read_sample_rate, sanitize_for_tts
-from liquidai_tts.const import DEFAULT_SYSTEM_PROMPT, DEFAULT_URL
+from ha_liquidai_custom.audio import read_sample_rate, sanitize_for_tts
+from ha_liquidai_custom.const import DEFAULT_SYSTEM_PROMPT, DEFAULT_URL
 
 
 async def main() -> int:
     """Run a single TTS request and write the WAV to disk."""
     parser = argparse.ArgumentParser(description="Smoke test LiquidAI TTS")
     parser.add_argument("--url", default=DEFAULT_URL, help="LiquidAI base URL")
-    parser.add_argument("--text", default="Hello from ha_liquidai smoke test.")
+    parser.add_argument("--text", default="Hello from ha_liquidai_custom smoke test.")
     parser.add_argument(
         "--system-prompt",
         default=DEFAULT_SYSTEM_PROMPT,
