@@ -77,8 +77,14 @@ def test_pop_complete_sentence() -> None:
 
 def test_pop_early_chunk() -> None:
     chunk, remainder = pop_early_chunk("Hello world this is a long buffer", 12)
-    assert chunk == "Hello world this is a long"
-    assert remainder == "buffer"
+    assert chunk == "Hello world this"
+    assert remainder == "is a long buffer"
+
+
+def test_pop_early_chunk_tight() -> None:
+    chunk, remainder = pop_early_chunk("Hello world this is", 12, max_extra=5)
+    assert chunk == "Hello world"
+    assert remainder == "this is"
 
 
 def test_trim_pcm_silence_preserves_edges() -> None:

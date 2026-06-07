@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from homeassistant.components import ffmpeg
 from homeassistant.components.tts import (
     TextToSpeechEntity,
     TTSAudioRequest,
@@ -15,7 +14,6 @@ from homeassistant.components.tts import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -53,8 +51,8 @@ from .const import (
     SUPPORTED_LANGUAGES,
 )
 
-# HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
-STREAM_EXTENSION = "mp3"
+# HA transcodes the stream once; per-chunk MP3 conversion added multi-second lag.
+STREAM_EXTENSION = "wav"
 ONESHOT_EXTENSION = "wav"
 
 
@@ -161,27 +159,68 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
     async def _audio_gen(
         self, request: TTSAudioRequest
     ) -> AsyncGenerator[bytes, None]:
-        """Yield mp3 chunks for each completed sentence."""
+        """Yield wav chunks for each speakable segment."""
+        sentences: asyncio.Queue[str | None] = asyncio.Queue()
+        collector = asyncio.create_task(self._collect_sentences(request, sentences))
         template_wav: bytes | None = None
         sample_rate: int | None = None
-        async for sentence in self._message_to_sentences(request.message_gen):
-            wav = await self._client.synthesize(sentence)
-            if template_wav is None:
-                template_wav = wav
-                sample_rate = read_sample_rate(wav)
-            wav_chunk = self._trimmed_wav(wav)
-            if wav_chunk:
-                yield await self._convert_wav_to_mp3(wav_chunk)
-            if (
-                self.chunk_gap_ms > 0
-                and sample_rate is not None
-                and template_wav is not None
-            ):
-                gap_wav = rebuild_wav(
-                    template_wav,
-                    make_silence_pcm(sample_rate, self.chunk_gap_ms),
-                )
-                yield await self._convert_wav_to_mp3(gap_wav)
+        pending_synth: asyncio.Task[bytes] | None = None
+
+        try:
+            while True:
+                if pending_synth is None:
+                    sentence = await sentences.get()
+                    if sentence is None:
+                        break
+                    pending_synth = asyncio.create_task(
+                        self._client.synthesize(sentence)
+                    )
+
+                wav = await pending_synth
+                pending_synth = None
+
+                try:
+                    next_sentence = sentences.get_nowait()
+                except asyncio.QueueEmpty:
+                    next_sentence = await sentences.get()
+
+                if next_sentence is not None:
+                    pending_synth = asyncio.create_task(
+                        self._client.synthesize(next_sentence)
+                    )
+
+                if template_wav is None:
+                    template_wav = wav
+                    sample_rate = read_sample_rate(wav)
+                wav_chunk = self._trimmed_wav(wav)
+                if wav_chunk:
+                    yield wav_chunk
+                if (
+                    self.chunk_gap_ms > 0
+                    and sample_rate is not None
+                    and template_wav is not None
+                ):
+                    yield rebuild_wav(
+                        template_wav,
+                        make_silence_pcm(sample_rate, self.chunk_gap_ms),
+                    )
+
+                if next_sentence is None:
+                    break
+        finally:
+            if pending_synth is not None:
+                pending_synth.cancel()
+            await collector
+
+    async def _collect_sentences(
+        self, request: TTSAudioRequest, sentences: asyncio.Queue[str | None]
+    ) -> None:
+        """Fill the queue while synthesis runs in parallel."""
+        try:
+            async for sentence in self._message_to_sentences(request.message_gen):
+                await sentences.put(sentence)
+        finally:
+            await sentences.put(None)
 
     def _trimmed_wav(self, wav: bytes) -> bytes:
         """Return a trimmed WAV buffer."""
@@ -195,36 +234,6 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         if not trimmed:
             return b""
         return rebuild_wav(wav, trimmed)
-
-    async def _convert_wav_to_mp3(self, wav: bytes) -> bytes:
-        """Convert WAV bytes to MP3 using Home Assistant ffmpeg."""
-        ffmpeg_manager = ffmpeg.get_ffmpeg_manager(self.hass)
-        command = [
-            ffmpeg_manager.binary,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            "pipe:0",
-            "-f",
-            "mp3",
-            "-q:a",
-            "0",
-            "pipe:1",
-        ]
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate(wav)
-        if process.returncode != 0:
-            detail = stderr.decode(errors="replace").strip()
-            raise HomeAssistantError(f"ffmpeg mp3 conversion failed: {detail}")
-        if not stdout:
-            raise HomeAssistantError("ffmpeg mp3 conversion returned empty audio")
-        return stdout
 
     async def _message_to_sentences(
         self, message_gen: AsyncGenerator[str, None]
@@ -247,7 +256,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                     yield plain
 
             if not first_chunk_sent and min_early > 0:
-                early, buffer = pop_early_chunk(buffer, min_early)
+                early, buffer = pop_early_chunk(buffer, min_early, max_extra=5)
                 if early:
                     plain = sanitize_for_tts(early)
                     if plain:

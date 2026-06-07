@@ -66,7 +66,9 @@ If text appears all at once at the end, the problem is layer 1 or 2, not TTS.
 
 Under **LiquidAI TTS → Configure → Advanced**:
 
-- **Stream first chunk after (chars)** — default `40`. Speaks before the first `. ! ?` once this many characters have arrived. Set `0` to wait for full sentences only.
+- **Stream first chunk after (chars)** — default `20`. Speaks before the first `. ! ?` once this many characters have arrived. Set `0` to wait for full sentences only.
+
+Text on screen streams from the LLM immediately; audio starts after LiquidAI synthesizes the first chunk (typically a few seconds). Smaller values reduce that gap.
 
 ## Troubleshooting
 

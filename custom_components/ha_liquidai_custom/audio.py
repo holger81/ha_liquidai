@@ -75,17 +75,27 @@ def pop_complete_sentence(buffer: str) -> tuple[str | None, str]:
     return sentence, buffer[match.end() :]
 
 
-def pop_early_chunk(buffer: str, min_chars: int) -> tuple[str | None, str]:
+def pop_early_chunk(
+    buffer: str, min_chars: int, *, max_extra: int = 30
+) -> tuple[str | None, str]:
     """Pop a speakable prefix once the buffer reaches min_chars."""
     plain = buffer.strip()
     if len(plain) < min_chars:
         return None, buffer
 
-    break_at = min_chars
-    if len(plain) > min_chars:
-        space = plain.rfind(" ", 0, min(min_chars + 30, len(plain)))
+    if max_extra <= 5:
+        break_at = min_chars
+        space = plain.rfind(" ", 0, min_chars + 1)
         if space >= min_chars // 2:
             break_at = space
+    else:
+        break_at = min_chars
+        window_end = min(len(plain), min_chars + max_extra)
+        space = plain.find(" ", min_chars, window_end)
+        if space >= min_chars:
+            break_at = space
+        elif len(plain) >= window_end:
+            break_at = window_end
 
     chunk = plain[:break_at].strip()
     remainder = plain[break_at:].lstrip()
