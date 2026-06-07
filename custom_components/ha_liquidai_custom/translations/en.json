@@ -24,7 +24,8 @@
           "keep_edge_ms": "Keep edge (ms)",
           "chunk_gap_ms": "Chunk gap (ms)",
           "silence_threshold": "Silence threshold",
-          "stream_first_chunk_chars": "Stream first chunk after (chars)"
+          "stream_first_chunk_chars": "Stream first chunk after (chars)",
+          "speech_speed": "Speech speed"
         }
       }
     },
@@ -41,7 +42,8 @@
           "keep_edge_ms": "Keep edge (ms)",
           "chunk_gap_ms": "Chunk gap (ms)",
           "silence_threshold": "Silence threshold",
-          "stream_first_chunk_chars": "Stream first chunk after (chars)"
+          "stream_first_chunk_chars": "Stream first chunk after (chars)",
+          "speech_speed": "Speech speed"
         }
       }
     }

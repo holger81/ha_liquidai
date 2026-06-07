@@ -18,9 +18,11 @@ from .const import (
     CONF_KEEP_EDGE_MS,
     CONF_MAX_CHUNK_LEN,
     CONF_SILENCE_THRESHOLD,
+    CONF_SPEECH_SPEED,
     CONF_STREAM_FIRST_CHUNK_CHARS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
+    DEFAULT_SPEECH_SPEED,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DEFAULT_URL,
@@ -28,6 +30,8 @@ from .const import (
     KEEP_EDGE_MS,
     LOGGER,
     MAX_CHUNK_LEN,
+    MAX_SPEECH_SPEED,
+    MIN_SPEECH_SPEED,
     SILENCE_THRESHOLD,
     STREAM_FIRST_CHUNK_CHARS,
 )
@@ -133,6 +137,17 @@ def _advanced_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     min=0,
                     max=200,
                     step=5,
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            ),
+            vol.Optional(
+                CONF_SPEECH_SPEED,
+                default=defaults.get(CONF_SPEECH_SPEED, DEFAULT_SPEECH_SPEED),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_SPEECH_SPEED,
+                    max=MAX_SPEECH_SPEED,
+                    step=0.05,
                     mode=selector.NumberSelectorMode.BOX,
                 ),
             ),

@@ -66,7 +66,7 @@ If text appears all at once at the end, the problem is layer 1 or 2, not TTS.
 
 Under **LiquidAI TTS → Configure → Advanced**:
 
-- **Stream first chunk after (chars)** — default `40`. Speaks before the first `. ! ?` once this many characters have arrived. Set `0` to wait for full sentences only.
+- **Speech speed** — default `1.0`. Values above `1.0` play faster (e.g. `1.25` ≈ 25% faster) via ffmpeg; LiquidAI itself has no speed parameter.
 
 Chat text appears before audio because the LLM streams faster than LiquidAI can synthesize each chunk. The integration overlaps synthesis, text buffering, and MP3 conversion between consecutive sentences to reduce gaps without changing the MP3 chunk format Home Assistant expects.
 

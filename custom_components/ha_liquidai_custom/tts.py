@@ -39,10 +39,12 @@ from .const import (
     CONF_KEEP_EDGE_MS,
     CONF_MAX_CHUNK_LEN,
     CONF_SILENCE_THRESHOLD,
+    CONF_SPEECH_SPEED,
     CONF_STREAM_FIRST_CHUNK_CHARS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DEFAULT_LANGUAGE,
+    DEFAULT_SPEECH_SPEED,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     KEEP_EDGE_MS,
@@ -115,6 +117,13 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             )
         )
 
+    @property
+    def speech_speed(self) -> float:
+        """Return playback speed multiplier (1.0 = normal)."""
+        return float(
+            self._entry.options.get(CONF_SPEECH_SPEED, DEFAULT_SPEECH_SPEED)
+        )
+
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict[str, Any]
     ) -> TtsAudioType:
@@ -136,7 +145,9 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 threshold=self.silence_threshold,
                 keep_edge_ms=self.keep_edge_ms,
             )
-            return ONESHOT_EXTENSION, rebuild_wav(wav, trimmed)
+            return ONESHOT_EXTENSION, await self._maybe_adjust_wav_speed(
+                rebuild_wav(wav, trimmed)
+            )
 
         wav_buffers = await asyncio.gather(
             *(self._client.synthesize(chunk) for chunk in chunks)
@@ -147,7 +158,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             keep_edge_ms=self.keep_edge_ms,
             threshold=self.silence_threshold,
         )
-        return ONESHOT_EXTENSION, merged
+        return ONESHOT_EXTENSION, await self._maybe_adjust_wav_speed(merged)
 
     async def async_stream_tts_audio(
         self, request: TTSAudioRequest
@@ -230,12 +241,28 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             return b""
         return rebuild_wav(wav, trimmed)
 
+    async def _maybe_adjust_wav_speed(self, wav: bytes) -> bytes:
+        """Apply speech speed to WAV bytes when configured."""
+        if not wav or self.speech_speed == 1.0:
+            return wav
+        return await self._ffmpeg_wav(wav, output_format="wav")
+
     async def _convert_wav_to_mp3(
         self, wav: bytes, *, streaming: bool = False
     ) -> bytes:
         """Convert WAV bytes to MP3 using Home Assistant ffmpeg."""
         if not wav:
             return b""
+        return await self._ffmpeg_wav(wav, output_format="mp3", streaming=streaming)
+
+    async def _ffmpeg_wav(
+        self,
+        wav: bytes,
+        *,
+        output_format: str,
+        streaming: bool = False,
+    ) -> bytes:
+        """Run ffmpeg on WAV bytes (speed, optional MP3 encode)."""
         ffmpeg_manager = ffmpeg.get_ffmpeg_manager(self.hass)
         command = [
             ffmpeg_manager.binary,
@@ -244,12 +271,13 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             "error",
             "-i",
             "pipe:0",
-            "-f",
-            "mp3",
-            "-q:a",
-            "2" if streaming else "0",
-            "pipe:1",
         ]
+        if self.speech_speed != 1.0:
+            command.extend(["-filter:a", f"atempo={self.speech_speed}"])
+        command.extend(["-f", output_format])
+        if output_format == "mp3":
+            command.extend(["-q:a", "2" if streaming else "0"])
+        command.append("pipe:1")
         process = await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
@@ -259,9 +287,13 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         stdout, stderr = await process.communicate(wav)
         if process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
-            raise HomeAssistantError(f"ffmpeg mp3 conversion failed: {detail}")
+            raise HomeAssistantError(
+                f"ffmpeg {output_format} conversion failed: {detail}"
+            )
         if not stdout:
-            raise HomeAssistantError("ffmpeg mp3 conversion returned empty audio")
+            raise HomeAssistantError(
+                f"ffmpeg {output_format} conversion returned empty audio"
+            )
         return stdout
 
     async def _message_to_sentences(
