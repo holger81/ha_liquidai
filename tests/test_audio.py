@@ -41,6 +41,7 @@ audio = _load_component_module("audio")
 sanitize_for_tts = audio.sanitize_for_tts
 split_for_tts = audio.split_for_tts
 pop_complete_sentence = audio.pop_complete_sentence
+pop_early_chunk = audio.pop_early_chunk
 trim_pcm_silence = audio.trim_pcm_silence
 concat_wav_buffers = audio.concat_wav_buffers
 
@@ -72,6 +73,12 @@ def test_pop_complete_sentence() -> None:
     sentence, remainder = pop_complete_sentence("Hello world. More text")
     assert sentence == "Hello world."
     assert remainder == " More text"
+
+
+def test_pop_early_chunk() -> None:
+    chunk, remainder = pop_early_chunk("Hello world this is a long buffer", 12)
+    assert chunk == "Hello world this is a long"
+    assert remainder == "buffer"
 
 
 def test_trim_pcm_silence_preserves_edges() -> None:

@@ -44,12 +44,36 @@ Use this integration as the **TTS** stage in a Home Assistant Assist pipeline wh
    - **First sentence audio** starts before the full reply is generated
    - `tts_output.url` appears early in pipeline debug output (HA 2025.10+)
 
+### Three layers must all stream
+
+End-to-end streaming is **not** only a TTS setting. All three layers must cooperate:
+
+| Layer | What to check |
+|-------|----------------|
+| **1. Webhook Conversation (HA)** | Conversation sub-entry → **Enable Response Streaming** must be ON. If OFF, HA waits for the full n8n JSON reply before any TTS starts. |
+| **2. n8n agent** | Webhook `responseMode: streaming`, Agent `enableStreaming: true`, and NDJSON lines like `{"type":"item","content":"..."}` (n8n LangChain agent handles this when streaming is wired correctly). |
+| **3. LiquidAI TTS (this integration)** | Implements `async_stream_tts_audio`. HA only connects the text stream to TTS after **60 characters** (`STREAM_RESPONSE_CHARS` in core) or when tool calls follow text. |
+
+In **Assist pipeline debug**, look for:
+
+- `chat_log_delta` events during intent (text arriving incrementally)
+- `tts_start_streaming: true` in an `intent-progress` event
+- `stream_response: true` in `run-start` → `tts_output`
+
+If text appears all at once at the end, the problem is layer 1 or 2, not TTS.
+
+### TTS chunk tuning
+
+Under **LiquidAI TTS → Configure → Advanced**:
+
+- **Stream first chunk after (chars)** — default `40`. Speaks before the first `. ! ?` once this many characters have arrived. Set `0` to wait for full sentences only.
+
 ## Troubleshooting
 
 | Symptom | Check |
 |---------|--------|
 | No audio | LiquidAI URL from HA host, firewall, `scripts/smoke_test_tts.py` |
-| Long delay before speech | Conversation streaming enabled in n8n; TTS entity is `ha_liquidai_custom` not webhook TTS |
+| Long delay before speech | **Enable Response Streaming** on Webhook Conversation sub-entry; confirm `chat_log_delta` in pipeline debug; TTS entity is `ha_liquidai_custom` not webhook TTS |
 | Choppy playback | Tune **Advanced** options (keep edge, chunk gap) under integration settings |
 | Tool calls delay speech | Normal — streaming TTS starts after text deltas begin |
 

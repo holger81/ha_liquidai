@@ -18,6 +18,7 @@ from .const import (
     CONF_KEEP_EDGE_MS,
     CONF_MAX_CHUNK_LEN,
     CONF_SILENCE_THRESHOLD,
+    CONF_STREAM_FIRST_CHUNK_CHARS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DEFAULT_SYSTEM_PROMPT,
@@ -28,6 +29,7 @@ from .const import (
     LOGGER,
     MAX_CHUNK_LEN,
     SILENCE_THRESHOLD,
+    STREAM_FIRST_CHUNK_CHARS,
 )
 
 
@@ -118,6 +120,19 @@ def _advanced_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     min=0,
                     max=5000,
                     step=50,
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            ),
+            vol.Optional(
+                CONF_STREAM_FIRST_CHUNK_CHARS,
+                default=defaults.get(
+                    CONF_STREAM_FIRST_CHUNK_CHARS, STREAM_FIRST_CHUNK_CHARS
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=200,
+                    step=5,
                     mode=selector.NumberSelectorMode.BOX,
                 ),
             ),

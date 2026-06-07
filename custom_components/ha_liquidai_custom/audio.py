@@ -75,6 +75,25 @@ def pop_complete_sentence(buffer: str) -> tuple[str | None, str]:
     return sentence, buffer[match.end() :]
 
 
+def pop_early_chunk(buffer: str, min_chars: int) -> tuple[str | None, str]:
+    """Pop a speakable prefix once the buffer reaches min_chars."""
+    plain = buffer.strip()
+    if len(plain) < min_chars:
+        return None, buffer
+
+    break_at = min_chars
+    if len(plain) > min_chars:
+        space = plain.rfind(" ", 0, min(min_chars + 30, len(plain)))
+        if space >= min_chars // 2:
+            break_at = space
+
+    chunk = plain[:break_at].strip()
+    remainder = plain[break_at:].lstrip()
+    if not chunk:
+        return None, buffer
+    return chunk, remainder
+
+
 def read_sample_rate(wav_bytes: bytes) -> int:
     """Read the sample rate from a WAV header."""
     offset = 12

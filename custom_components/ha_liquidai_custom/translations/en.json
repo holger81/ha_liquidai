@@ -23,7 +23,8 @@
           "max_chunk_len": "Maximum chunk length",
           "keep_edge_ms": "Keep edge (ms)",
           "chunk_gap_ms": "Chunk gap (ms)",
-          "silence_threshold": "Silence threshold"
+          "silence_threshold": "Silence threshold",
+          "stream_first_chunk_chars": "Stream first chunk after (chars)"
         }
       }
     },
@@ -39,7 +40,8 @@
           "max_chunk_len": "Maximum chunk length",
           "keep_edge_ms": "Keep edge (ms)",
           "chunk_gap_ms": "Chunk gap (ms)",
-          "silence_threshold": "Silence threshold"
+          "silence_threshold": "Silence threshold",
+          "stream_first_chunk_chars": "Stream first chunk after (chars)"
         }
       }
     }

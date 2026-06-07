@@ -24,6 +24,7 @@ from .audio import (
     extract_pcm,
     make_silence_pcm,
     pop_complete_sentence,
+    pop_early_chunk,
     read_sample_rate,
     rebuild_wav,
     sanitize_for_tts,
@@ -38,6 +39,7 @@ from .const import (
     CONF_KEEP_EDGE_MS,
     CONF_MAX_CHUNK_LEN,
     CONF_SILENCE_THRESHOLD,
+    CONF_STREAM_FIRST_CHUNK_CHARS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DEFAULT_LANGUAGE,
@@ -47,6 +49,7 @@ from .const import (
     LOGGER,
     MAX_CHUNK_LEN,
     SILENCE_THRESHOLD,
+    STREAM_FIRST_CHUNK_CHARS,
     SUPPORTED_LANGUAGES,
 )
 
@@ -101,6 +104,15 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         """Return PCM silence threshold."""
         return int(
             self._entry.options.get(CONF_SILENCE_THRESHOLD, SILENCE_THRESHOLD)
+        )
+
+    @property
+    def stream_first_chunk_chars(self) -> int:
+        """Return minimum chars before the first streaming TTS chunk."""
+        return int(
+            self._entry.options.get(
+                CONF_STREAM_FIRST_CHUNK_CHARS, STREAM_FIRST_CHUNK_CHARS
+            )
         )
 
     async def async_get_tts_audio(
@@ -219,6 +231,9 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
     ) -> AsyncGenerator[str, None]:
         """Convert a text stream into speakable sentences."""
         buffer = ""
+        first_chunk_sent = False
+        min_early = self.stream_first_chunk_chars
+
         async for delta in message_gen:
             buffer += delta
             while True:
@@ -227,8 +242,29 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                     break
                 plain = sanitize_for_tts(sentence)
                 if plain:
+                    first_chunk_sent = True
                     LOGGER.debug("Streaming sentence (%d chars)", len(plain))
                     yield plain
+
+            if not first_chunk_sent and min_early > 0:
+                early, buffer = pop_early_chunk(buffer, min_early)
+                if early:
+                    plain = sanitize_for_tts(early)
+                    if plain:
+                        first_chunk_sent = True
+                        LOGGER.debug(
+                            "Streaming early chunk (%d chars)", len(plain)
+                        )
+                        yield plain
+
+        while True:
+            sentence, buffer = pop_complete_sentence(buffer)
+            if sentence is None:
+                break
+            plain = sanitize_for_tts(sentence)
+            if plain:
+                LOGGER.debug("Streaming sentence (%d chars)", len(plain))
+                yield plain
 
         tail = sanitize_for_tts(buffer.strip())
         if tail:
