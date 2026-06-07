@@ -55,9 +55,10 @@ class LiquidAiTtsClient:
         if not text.strip():
             raise HomeAssistantError("No speakable text for TTS")
 
-        data = aiohttp.FormData()
-        data.add_field("text", text)
-        data.add_field("system_prompt", self._system_prompt)
+        data = {
+            "text": text,
+            "system_prompt": self._system_prompt,
+        }
 
         try:
             async with self._session.post(
