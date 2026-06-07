@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "LiquidAI server",
+        "description": "Enter the base URL of your LiquidAI server.",
+        "data": {
+          "base_url": "Base URL"
+        }
+      },
+      "prompt": {
+        "title": "Voice settings",
+        "description": "Configure the system prompt and request timeout.",
+        "data": {
+          "system_prompt": "System prompt",
+          "timeout": "Timeout (seconds)"
+        }
+      },
+      "advanced": {
+        "title": "Advanced audio tuning",
+        "description": "Fine-tune chunking and PCM trimming (defaults match n8n production).",
+        "data": {
+          "max_chunk_len": "Maximum chunk length",
+          "keep_edge_ms": "Keep edge (ms)",
+          "chunk_gap_ms": "Chunk gap (ms)",
+          "silence_threshold": "Silence threshold"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the LiquidAI server."
+    },
+    "abort": {}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Advanced audio tuning",
+        "data": {
+          "max_chunk_len": "Maximum chunk length",
+          "keep_edge_ms": "Keep edge (ms)",
+          "chunk_gap_ms": "Chunk gap (ms)",
+          "silence_threshold": "Silence threshold"
+        }
+      }
+    }
+  }
+}

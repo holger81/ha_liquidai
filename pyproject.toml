@@ -1,0 +1,13 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["custom_components", "scripts", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/smoke_test_tts.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
