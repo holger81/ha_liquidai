@@ -3,7 +3,7 @@
   "name": "LiquidAI TTS",
   "codeowners": ["@holger81"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["ffmpeg"],
   "documentation": "https://github.com/holger81/ha_liquidai",
   "integration_type": "service",
   "iot_class": "local_polling",
