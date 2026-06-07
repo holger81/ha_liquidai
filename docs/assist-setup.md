@@ -68,7 +68,7 @@ Under **LiquidAI TTS → Configure → Advanced**:
 
 - **Stream first chunk after (chars)** — default `40`. Speaks before the first `. ! ?` once this many characters have arrived. Set `0` to wait for full sentences only.
 
-Chat text appears before audio because the LLM streams faster than LiquidAI can synthesize each chunk.
+Chat text appears before audio because the LLM streams faster than LiquidAI can synthesize each chunk. The integration overlaps synthesis, text buffering, and MP3 conversion between consecutive sentences to reduce gaps without changing the MP3 chunk format Home Assistant expects.
 
 ## Troubleshooting
 

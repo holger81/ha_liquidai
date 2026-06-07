@@ -162,18 +162,50 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self, request: TTSAudioRequest
     ) -> AsyncGenerator[bytes, None]:
         """Yield mp3 chunks for each completed sentence."""
+        sentence_iter = self._message_to_sentences(request.message_gen).__aiter__()
         template_wav: bytes | None = None
         sample_rate: int | None = None
-        async for sentence in self._message_to_sentences(request.message_gen):
-            wav = await self._client.synthesize(sentence)
+
+        async def pull_sentence() -> str | None:
+            try:
+                return await sentence_iter.__anext__()
+            except StopAsyncIteration:
+                return None
+
+        first = await pull_sentence()
+        if first is None:
+            return
+
+        pending_synth: asyncio.Task[bytes] | None = asyncio.create_task(
+            self._client.synthesize(first)
+        )
+
+        while pending_synth is not None:
+            # Buffer the next segment while LiquidAI synthesizes the current one.
+            next_sentence_task = asyncio.create_task(pull_sentence())
+            wav = await pending_synth
+
             if template_wav is None:
                 template_wav = wav
                 sample_rate = read_sample_rate(wav)
-            wav_chunk = self._trimmed_wav(wav)
-            if wav_chunk:
-                yield await self._convert_wav_to_mp3(wav_chunk)
+
+            mp3_task = asyncio.create_task(
+                self._convert_wav_to_mp3(self._trimmed_wav(wav), streaming=True)
+            )
+            next_sentence = await next_sentence_task
+            pending_synth = (
+                asyncio.create_task(self._client.synthesize(next_sentence))
+                if next_sentence is not None
+                else None
+            )
+
+            mp3 = await mp3_task
+            if mp3:
+                yield mp3
+
             if (
-                self.chunk_gap_ms > 0
+                pending_synth is not None
+                and self.chunk_gap_ms > 0
                 and sample_rate is not None
                 and template_wav is not None
             ):
@@ -181,7 +213,9 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                     template_wav,
                     make_silence_pcm(sample_rate, self.chunk_gap_ms),
                 )
-                yield await self._convert_wav_to_mp3(gap_wav)
+                gap_mp3 = await self._convert_wav_to_mp3(gap_wav, streaming=True)
+                if gap_mp3:
+                    yield gap_mp3
 
     def _trimmed_wav(self, wav: bytes) -> bytes:
         """Return a trimmed WAV buffer."""
@@ -196,8 +230,12 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             return b""
         return rebuild_wav(wav, trimmed)
 
-    async def _convert_wav_to_mp3(self, wav: bytes) -> bytes:
+    async def _convert_wav_to_mp3(
+        self, wav: bytes, *, streaming: bool = False
+    ) -> bytes:
         """Convert WAV bytes to MP3 using Home Assistant ffmpeg."""
+        if not wav:
+            return b""
         ffmpeg_manager = ffmpeg.get_ffmpeg_manager(self.hass)
         command = [
             ffmpeg_manager.binary,
@@ -209,7 +247,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             "-f",
             "mp3",
             "-q:a",
-            "0",
+            "2" if streaming else "0",
             "pipe:1",
         ]
         process = await asyncio.create_subprocess_exec(
