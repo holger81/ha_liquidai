@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterable
 
+from homeassistant.components import ffmpeg
 from homeassistant.components.stt import (
     AudioBitRates,
     AudioChannels,
@@ -21,6 +23,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .audio import is_wav, pcm_to_wav
 from .client import LiquidAiTtsClient
 from .const import (
     CONF_ASR_SYSTEM_PROMPT,
@@ -32,13 +35,6 @@ from .const import (
     LOGGER,
     SUPPORTED_LANGUAGES,
 )
-
-
-def _mime_from_metadata(metadata: SpeechMetadata) -> str:
-    """Map Assist pipeline metadata to LiquidAI ASR type field."""
-    if metadata.format == AudioFormats.OGG or metadata.codec == AudioCodecs.OPUS:
-        return "audio/ogg"
-    return "audio/wav"
 
 
 async def async_setup_entry(
@@ -55,6 +51,7 @@ class LiquidAiSttEntity(SpeechToTextEntity):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the STT entity."""
+        self.hass = hass
         self._entry = entry
         self._client = LiquidAiTtsClient(
             async_get_clientsession(hass),
@@ -111,18 +108,20 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         if not audio_bytes:
             return SpeechResult("", SpeechResultState.SUCCESS)
 
-        mime_type = _mime_from_metadata(metadata)
         LOGGER.debug(
-            "Transcribing %d bytes (%s, %s Hz)",
+            "Transcribing %d bytes (%s/%s, %s Hz, %s ch)",
             len(audio_bytes),
-            mime_type,
+            metadata.format,
+            metadata.codec,
             metadata.sample_rate,
+            metadata.channel,
         )
 
         try:
+            wav_bytes = await self._prepare_wav_for_asr(audio_bytes, metadata)
             text = await self._client.transcribe(
-                audio_bytes,
-                mime_type=mime_type,
+                wav_bytes,
+                mime_type="audio/wav",
                 system_prompt=self.asr_system_prompt,
             )
         except HomeAssistantError as err:
@@ -130,3 +129,65 @@ class LiquidAiSttEntity(SpeechToTextEntity):
             return SpeechResult(None, SpeechResultState.ERROR)
 
         return SpeechResult(text, SpeechResultState.SUCCESS)
+
+    async def _prepare_wav_for_asr(
+        self,
+        audio_bytes: bytes,
+        metadata: SpeechMetadata,
+    ) -> bytes:
+        """Convert Assist pipeline audio into a WAV file for LiquidAI ASR."""
+        if is_wav(audio_bytes):
+            return audio_bytes
+
+        if metadata.format == AudioFormats.WAV and metadata.codec == AudioCodecs.PCM:
+            return pcm_to_wav(
+                audio_bytes,
+                sample_rate=int(metadata.sample_rate),
+                channels=int(metadata.channel),
+                bit_rate=int(metadata.bit_rate),
+            )
+
+        return await self._ffmpeg_to_wav(audio_bytes, metadata)
+
+    async def _ffmpeg_to_wav(
+        self,
+        audio_bytes: bytes,
+        metadata: SpeechMetadata,
+    ) -> bytes:
+        """Decode encoded Assist audio to WAV using ffmpeg."""
+        ffmpeg_manager = ffmpeg.get_ffmpeg_manager(self.hass)
+        input_format = "ogg" if metadata.format == AudioFormats.OGG else None
+        command = [
+            ffmpeg_manager.binary,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        ]
+        if input_format:
+            command.extend(["-f", input_format])
+        command.extend(
+            [
+                "-i",
+                "pipe:0",
+                "-ac",
+                str(int(metadata.channel)),
+                "-ar",
+                str(int(metadata.sample_rate)),
+                "-f",
+                "wav",
+                "pipe:1",
+            ]
+        )
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate(audio_bytes)
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()
+            raise HomeAssistantError(f"ffmpeg WAV conversion failed: {detail}")
+        if not stdout:
+            raise HomeAssistantError("ffmpeg WAV conversion returned empty audio")
+        return stdout

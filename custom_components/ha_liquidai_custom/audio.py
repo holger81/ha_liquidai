@@ -94,6 +94,51 @@ def pop_early_chunk(buffer: str, min_chars: int) -> tuple[str | None, str]:
     return chunk, remainder
 
 
+def is_wav(audio_bytes: bytes) -> bool:
+    """Return True when audio_bytes contains a WAV container."""
+    return (
+        len(audio_bytes) >= 12
+        and audio_bytes[:4] == b"RIFF"
+        and audio_bytes[8:12] == b"WAVE"
+    )
+
+
+def pcm_to_wav(
+    pcm: bytes,
+    *,
+    sample_rate: int,
+    channels: int = 1,
+    bit_rate: int = 16,
+) -> bytes:
+    """Wrap raw PCM samples in a WAV container."""
+    if bit_rate != 16:
+        raise ValueError("Only 16-bit PCM is supported for ASR")
+    if channels < 1:
+        raise ValueError("At least one channel is required")
+
+    bytes_per_sample = bit_rate // 8
+    block_align = channels * bytes_per_sample
+    byte_rate = sample_rate * block_align
+    data_size = len(pcm)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bit_rate,
+        b"data",
+        data_size,
+    )
+    return header + pcm
+
+
 def read_sample_rate(wav_bytes: bytes) -> int:
     """Read the sample rate from a WAV header."""
     offset = 12

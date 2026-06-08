@@ -101,6 +101,13 @@ def test_concat_wav_buffers_merges_two_chunks() -> None:
     assert len(merged) > len(wav_a)
 
 
+def test_pcm_to_wav_wraps_raw_pcm() -> None:
+    pcm = b"\x00\x00" * 1600
+    wav = audio.pcm_to_wav(pcm, sample_rate=16000, channels=1, bit_rate=16)
+    assert audio.is_wav(wav)
+    assert audio.extract_pcm(wav) == pcm
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
