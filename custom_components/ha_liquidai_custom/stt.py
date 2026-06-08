@@ -63,8 +63,12 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         )
         self._attr_name = "LiquidAI STT"
         self._attr_unique_id = f"{entry.entry_id}_stt"
-        self._attr_supported_languages = SUPPORTED_LANGUAGES
         self._attr_default_language = DEFAULT_LANGUAGE
+
+    @property
+    def supported_languages(self) -> list[str]:
+        """Return supported languages."""
+        return list(SUPPORTED_LANGUAGES)
 
     @property
     def asr_system_prompt(self) -> str:
