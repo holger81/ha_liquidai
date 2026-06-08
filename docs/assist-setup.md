@@ -1,12 +1,12 @@
 # Assist pipeline setup
 
-Use this integration as the **TTS** stage in a Home Assistant Assist pipeline while keeping **STT** and **Conversation** on n8n.
+Use this integration for **STT** and **TTS** in a Home Assistant Assist pipeline. **Conversation** can stay on n8n until Phase 4.
 
 ## Requirements
 
 - Home Assistant **2025.10** or newer (streaming TTS in Assist pipelines)
 - LiquidAI server reachable from Home Assistant (default `http://192.168.10.31:8811`)
-- n8n workflow from [ha_liquidai_n8n](https://github.com/holger81/ha_liquidai_n8n) for agent + STT
+- n8n workflow from [ha_liquidai_n8n](https://github.com/holger81/ha_liquidai_n8n) for agent (until Phase 4)
 
 ## Install the integration
 
@@ -18,7 +18,7 @@ Use this integration as the **TTS** stage in a Home Assistant Assist pipeline wh
 
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & services → Add integration**.
-4. Search for **LiquidAI TTS** and complete the config flow.
+4. Search for **LiquidAI** and complete the config flow.
 
 ## Configure the Assist pipeline
 
@@ -28,14 +28,27 @@ Use this integration as the **TTS** stage in a Home Assistant Assist pipeline wh
 
    | Stage | Provider |
    |-------|----------|
-   | Speech-to-text | Webhook STT (n8n `/webhook/stt`) |
+   | Speech-to-text | **LiquidAI STT** (`stt.ha_liquidai_custom`) |
    | Conversation | Webhook Conversation (n8n `/webhook/agent`, **streaming ON**) |
    | Text-to-speech | **LiquidAI TTS** (`tts.ha_liquidai_custom`) |
 
-4. Remove or disable the old **Webhook TTS** sub-entry if it is still selected.
-5. Keep agent timeout as configured in n8n; TTS timeout defaults to **120 s** per synthesis request.
+4. Remove or disable old **Webhook STT** and **Webhook TTS** sub-entries if still selected.
+5. Keep agent timeout as configured in n8n; STT/TTS timeout defaults to **120 s** per request.
 
-## Verify streaming
+## Verify STT
+
+1. Use Assist with a short phrase, for example: “Turn on the kitchen light.”
+2. Expected behaviour:
+   - Transcript appears without n8n in the path
+   - Agent receives the same text as before
+
+Or run a local smoke test:
+
+```bash
+python3 scripts/smoke_test_stt.py --audio sample.wav
+```
+
+## Verify streaming TTS
 
 1. Enable pipeline debug logging if needed.
 2. Ask a long question, for example: “What are today's news?”
@@ -64,7 +77,7 @@ If text appears all at once at the end, the problem is layer 1 or 2, not TTS.
 
 ### TTS chunk tuning
 
-Under **LiquidAI TTS → Configure → Advanced**:
+Under **LiquidAI → Configure → Advanced**:
 
 - **Speech speed** — default `1.0`. Values above `1.0` play faster (e.g. `1.25` ≈ 25% faster) via ffmpeg; LiquidAI itself has no speed parameter.
 
@@ -74,12 +87,15 @@ Chat text appears before audio because the LLM streams faster than LiquidAI can 
 
 | Symptom | Check |
 |---------|--------|
-| No audio | LiquidAI URL from HA host, firewall, `scripts/smoke_test_tts.py` |
+| No transcript | LiquidAI URL from HA host, firewall, `scripts/smoke_test_stt.py` |
+| Empty transcript | Microphone / wake word; silent test WAV returns empty (expected) |
+| No audio | LiquidAI URL, `scripts/smoke_test_tts.py` |
 | Long delay before speech | **Enable Response Streaming** on Webhook Conversation sub-entry; confirm `chat_log_delta` in pipeline debug; TTS entity is `ha_liquidai_custom` not webhook TTS |
 | Choppy playback | Tune **Advanced** options (keep edge, chunk gap) under integration settings |
 | Tool calls delay speech | Normal — streaming TTS starts after text deltas begin |
 
 ## Related
 
+- [migration-from-n8n-stt.md](./migration-from-n8n-stt.md)
 - [migration-from-n8n-tts.md](./migration-from-n8n-tts.md)
 - [PLAN.md](../PLAN.md)

@@ -8,6 +8,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/smoke_test_tts.py" = ["E402"]
+"scripts/smoke_test_stt.py" = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

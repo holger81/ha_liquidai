@@ -1,4 +1,4 @@
-"""Config flow for LiquidAI TTS."""
+"""Config flow for LiquidAI."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from .client import LiquidAiTtsClient
 from .const import (
     CHUNK_GAP_MS,
+    CONF_ASR_SYSTEM_PROMPT,
     CONF_BASE_URL,
     CONF_CHUNK_GAP_MS,
     CONF_KEEP_EDGE_MS,
@@ -22,6 +23,7 @@ from .const import (
     CONF_STREAM_FIRST_CHUNK_CHARS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
+    DEFAULT_ASR_SYSTEM_PROMPT,
     DEFAULT_SPEECH_SPEED,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
@@ -58,6 +60,15 @@ def _prompt_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Required(
                 CONF_SYSTEM_PROMPT,
                 default=defaults.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT,
+                    multiline=True,
+                ),
+            ),
+            vol.Required(
+                CONF_ASR_SYSTEM_PROMPT,
+                default=defaults.get(CONF_ASR_SYSTEM_PROMPT, DEFAULT_ASR_SYSTEM_PROMPT),
             ): selector.TextSelector(
                 selector.TextSelectorConfig(
                     type=selector.TextSelectorType.TEXT,
@@ -214,7 +225,7 @@ class LiquidAiTtsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         """Configure advanced audio tuning options."""
         if user_input is not None:
             return self.async_create_entry(
-                title="LiquidAI TTS",
+                title="LiquidAI",
                 data=self._data,
                 options=user_input,
             )

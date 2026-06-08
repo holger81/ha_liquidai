@@ -1,25 +1,33 @@
 # ha_liquidai
 
-Home Assistant custom integration for **local LiquidAI TTS** with Assist **streaming** support.
+Home Assistant custom integration for **local LiquidAI voice** (STT, TTS, and agent) with native Assist pipeline support.
 
-Replaces the n8n `/webhook/tts` path from [ha_liquidai_n8n](https://github.com/holger81/ha_liquidai_n8n) while keeping agent and STT on n8n.
+Replaces the n8n + Webhook Conversation stack from [ha_liquidai_n8n](https://github.com/holger81/ha_liquidai_n8n).
 
 ## Status
 
-**v0.1.0** — config flow, one-shot TTS, and Assist streaming TTS implemented.
+| Phase | Feature | Status |
+|-------|---------|--------|
+| 1–2 | TTS (1-shot + streaming) | **Done** (v0.1.0) |
+| 3 | STT → LiquidAI `/v1/asr` | **Done** (v0.2.0) |
+| 4 | Conversation agent + tool loop | Planned |
+| 5 | Multi-model router + MCP client | Planned |
+| 6 | Retire n8n / Webhook Conversation | Planned |
 
-## Stack
+See [PLAN.md](PLAN.md) for the full architecture (agent loop, model router, MCP client).
+
+## Stack (target)
 
 | Assist stage | Backend |
 |--------------|---------|
-| STT | n8n → LiquidAI `/v1/asr` |
-| Conversation | n8n → llama.cpp + MCP |
-| **TTS** | **This integration** → LiquidAI `/v1/tts` |
+| STT | **This integration** → LiquidAI `/v1/asr` |
+| Conversation | **This integration** → llama.cpp + MCP Proxy agent loop |
+| TTS | **This integration** → LiquidAI `/v1/tts` ✅ |
 
 ## Requirements
 
 - Home Assistant **2025.10+** (Assist pipeline streaming TTS)
-- LiquidAI server with `/v1/tts` (form POST: `text`, `system_prompt`)
+- LiquidAI server with `/v1/tts` and `/v1/asr` (form POST)
 
 ## Install
 
@@ -33,14 +41,14 @@ Or copy `custom_components/ha_liquidai_custom/` into `config/custom_components/`
 
 ### HACS
 
-Add this repository as a custom integration repository, then install **LiquidAI TTS** from HACS.
+Add this repository as a custom integration repository, then install **LiquidAI** from HACS.
 
 ### Configure
 
-1. **Settings → Devices & services → Add integration → LiquidAI TTS**
+1. **Settings → Devices & services → Add integration → LiquidAI**
 2. Enter your LiquidAI base URL (default `http://192.168.10.31:8811`)
-3. Set the system prompt and optional advanced tuning
-4. Wire the entity into your Assist pipeline — see [docs/assist-setup.md](docs/assist-setup.md)
+3. Set TTS/ASR system prompts and optional advanced tuning
+4. Wire STT and TTS into your Assist pipeline — see [docs/assist-setup.md](docs/assist-setup.md)
 
 ## Usage
 
@@ -61,6 +69,7 @@ data:
 ```bash
 pip install aiohttp
 python3 scripts/smoke_test_tts.py --text "Hello world."
+python3 scripts/smoke_test_stt.py --audio /path/to/sample.wav
 ```
 
 ## Development
@@ -75,6 +84,7 @@ pytest tests/
 
 - [Implementation plan](PLAN.md)
 - [Assist pipeline setup](docs/assist-setup.md)
+- [Migration from n8n STT](docs/migration-from-n8n-stt.md)
 - [Migration from n8n TTS](docs/migration-from-n8n-tts.md)
 
 ## License

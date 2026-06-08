@@ -10,9 +10,10 @@
       },
       "prompt": {
         "title": "Voice settings",
-        "description": "Configure the system prompt and request timeout.",
+        "description": "Configure TTS/ASR system prompts and request timeout.",
         "data": {
-          "system_prompt": "System prompt",
+          "system_prompt": "TTS system prompt",
+          "asr_system_prompt": "ASR system prompt",
           "timeout": "Timeout (seconds)"
         }
       },

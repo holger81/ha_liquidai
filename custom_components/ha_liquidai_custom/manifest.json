@@ -1,6 +1,6 @@
 {
   "domain": "ha_liquidai_custom",
-  "name": "LiquidAI TTS",
+  "name": "LiquidAI",
   "codeowners": ["@holger81"],
   "config_flow": true,
   "dependencies": ["ffmpeg"],
@@ -9,5 +9,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/holger81/ha_liquidai/issues",
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
