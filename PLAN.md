@@ -11,7 +11,7 @@ Replace the entire n8n + Webhook Conversation path with a **native Home Assistan
 2. Calls **LiquidAI** directly for STT/TTS (`:8811`)
 3. Calls **llama.cpp** (OpenAI-compatible) for LLM inference (`:9292`)
 4. Calls **MCP Proxy** for mail, news, and extended tools (`:2222`)
-5. Supports **multi-model routing** — different models/backends per task type
+5. Supports **multi-model routing** — optional different LLM backends per task *style* (e.g. actions vs chat), not topic bypasses
 6. Streams conversation text and TTS audio natively through the Assist pipeline
 
 ## Why move off n8n
@@ -19,7 +19,7 @@ Replace the entire n8n + Webhook Conversation path with a **native Home Assistan
 | Problem in n8n today | HA-native fix |
 |----------------------|---------------|
 | LangChain wraps MCP `callTool` badly (`value`, nested `toolName`) | Python loop with explicit JSON schema |
-| Gemma picks SearXNG instead of `news_curate` | Route news → MCP-only path, no tool discovery |
+| Gemma picks SearXNG instead of `news_curate` | Clear MCP tool instructions + native tool loop (model chooses tools) |
 | Webhook hop + NDJSON translation | Native `AbstractConversationAgent` |
 | Parallel branch / execution-order bugs | Single asyncio agent loop |
 | Prompt hacks in Code nodes (`tool_context`) | Structured context builder in Python |
@@ -37,13 +37,6 @@ flowchart TB
     TTS["ha_liquidai_custom TTS"]
   end
 
-  subgraph Router["Model router (in integration)"]
-    R["classify(user_text) → TaskRoute"]
-    M1["ha_actions → fast model"]
-    M2["chat → main model"]
-    M3["news → MCP only, no LLM search"]
-  end
-
   subgraph Backends
     LAI["LiquidAI :8811 ASR/TTS"]
     LLM["llama.cpp :9292"]
@@ -51,39 +44,30 @@ flowchart TB
   end
 
   STT --> LAI
-  Agent --> Router
-  Router --> M1 --> LLM
-  Router --> M2 --> LLM
-  Router --> M3 --> MCP
+  Agent --> LLM
   Agent --> MCP
   TTS --> LAI
 ```
 
-**Agent loop (replaces n8n LangChain Agent):**
+**Agent loop (replaces n8n LangChain Agent):** one LLM + tool loop; the model selects MCP and HA tools. No hard-coded news (or other topic) bypass paths.
 
 ```mermaid
 sequenceDiagram
   participant User
   participant HA as HA Conversation Agent
-  participant Router as Model router
   participant LLM as llama.cpp
   participant MCP as MCP Proxy
   participant TTS as LiquidAI TTS
 
   User->>HA: voice/text
-  HA->>Router: classify query + exposed entities
-  alt news route
-    HA->>MCP: mcp_news__news_curate {}
-    MCP-->>HA: headlines
-    HA->>LLM: summarize only (optional small model)
-  else device route
-    HA->>LLM: chat + tools (open_cover, ha_call_service, …)
-    LLM-->>HA: tool_call
+  HA->>LLM: chat + tools (MCP + native HA)
+  loop until no tool_calls
+    LLM-->>HA: tool_call(s)
     HA->>MCP: callTool (flat args)
     MCP-->>HA: result
-    HA->>LLM: tool result
+    HA->>LLM: tool result(s)
   end
-  HA-->>User: stream text deltas
+  LLM-->>HA: stream text deltas
   HA-->>TTS: message_gen per sentence
   TTS-->>User: early audio playback
 ```
@@ -107,7 +91,7 @@ ha_liquidai/
 │       ├── liquidai_client.py       # ASR + TTS HTTP (rename from client.py)
 │       ├── llm_client.py            # OpenAI-compatible chat + streaming
 │       ├── mcp_client.py            # MCP Proxy JSON-RPC / callTool
-│       ├── router.py                # TaskRoute + classify()
+│       ├── router.py                # optional TaskRoute + classify() (Phase 5)
 │       ├── agent.py                 # tool loop, memory, streaming
 │       ├── context.py               # exposed entities, tool hints (port agent_input_code.js)
 │       ├── tools.py                 # tool schemas + execute (MCP + hass.services)
@@ -133,6 +117,79 @@ ha_liquidai/
     ├── migration-from-n8n.md        # full stack migration
     └── migration-from-n8n-tts.md
 ```
+
+---
+
+## UI configuration (config flow)
+
+**Requirement:** Every backend URL, model ID, credential, timeout, and agent path must be editable in Home Assistant — no hardcoded hosts or models in runtime code. `const.py` supplies **defaults for form fields only**; clients read `config_entry.data` and `config_entry.options`.
+
+### Principles
+
+| Rule | Detail |
+|------|--------|
+| No silent hardcoding | Do not embed `:8811`, `:9292`, `:2222`, model slugs, or paths in `agent.py` / clients |
+| Reconfigure | URLs and secrets changeable via **Configure → Reconfigure** without removing the integration |
+| Options flow | Tuning knobs (temperature, iterations, audio) editable under **Configure → Options** |
+| Validate on save | Each connection step probes its endpoint before the entry is saved |
+| Sensible defaults | Pre-fill forms from `const.py` so a local stack works out of the box |
+
+### Config flow steps (target)
+
+| Step | Fields | Validates |
+|------|--------|-----------|
+| **1. LiquidAI** ✅ | Base URL, request timeout | Reachability of LiquidAI |
+| **2. Prompts** ✅ (extend) | TTS prompt, ASR prompt, **agent system prompt**, **tool instructions** (multiline) | — |
+| **3. LLM** | Base URL, model ID, API key (optional), max tokens, temperature, timeout, **enable thinking** (bool) | `GET /v1/models` or minimal chat probe |
+| **4. MCP** | Proxy URL, bearer token, timeout, **health URL** (optional; default `{host}/api/health`) | Health GET + MCP initialize |
+| **5. Agent** | Max iterations, history turns, **enable conversation streaming** (bool) | — |
+| **6. Advanced audio** ✅ | Chunk length, speech speed, stream-first-chunk, silence trim | — |
+
+Phase 5 adds **router options** (still UI-only, no YAML):
+
+| Options (Phase 5) | Fields |
+|-------------------|--------|
+| Action backend | **Use separate action model** (bool); if true: action URL, action model ID, action temperature (defaults copy from main, all overridable) |
+
+### Full settings map (UI ↔ storage)
+
+| UI label | Config key | Default | Phase |
+|----------|------------|---------|-------|
+| LiquidAI URL | `base_url` | `http://192.168.10.31:8811` | 1 ✅ |
+| Request timeout | `timeout` | `120` | 1 ✅ |
+| TTS system prompt | `system_prompt` | US female voice | 1 ✅ |
+| ASR system prompt | `asr_system_prompt` | `Perform ASR.` | 3 ✅ |
+| Agent system prompt | `agent_system_prompt` | (port from n8n) | 4 |
+| Tool instructions | `tool_instructions` | (port `mcpAgentHint`) | 4 |
+| LLM base URL | `llm_base_url` | `http://192.168.10.31:9292/v1` | 4 |
+| LLM model | `llm_model` | Gemma slug | 4 |
+| LLM API key | `llm_api_key` | empty | 4 |
+| LLM max tokens | `llm_max_tokens` | `4096` | 4 |
+| LLM temperature | `llm_temperature` | `0.3` | 4 |
+| LLM timeout | `llm_timeout` | `120` | 4 |
+| Enable thinking | `llm_enable_thinking` | `false` | 4 |
+| MCP URL | `mcp_url` | `http://192.168.10.31:2222/mcp` | 4 |
+| MCP bearer token | `mcp_bearer_token` | (required) | 4 |
+| MCP timeout | `mcp_timeout` | `120` | 4 |
+| MCP health URL | `mcp_health_url` | derived from MCP host | 4 |
+| Max agent iterations | `max_agent_iterations` | `8` | 4 |
+| Conversation history turns | `conversation_history_turns` | `10` | 4 |
+| Enable response streaming | `conversation_enable_streaming` | `true` | 4 |
+| Use separate action model | `use_action_backend` | `false` | 5 |
+| Action LLM URL | `action_llm_base_url` | same as main | 5 |
+| Action LLM model | `action_llm_model` | same as main | 5 |
+| Action temperature | `action_llm_temperature` | `0.1` | 5 |
+| Speech speed, chunk tuning | options ✅ | see Phase 1–3 | ✅ |
+
+Runtime code loads backends via helpers, e.g. `get_llm_backend(entry, style="chat"|"action")` — never inline URLs.
+
+### Exit criteria (UI)
+
+- [ ] Changing LiquidAI / LLM / MCP URLs in UI takes effect after reload (no code edit)
+- [ ] Changing model IDs in UI switches the model without redeploy
+- [ ] MCP token and LLM API key stored as config secrets (password fields)
+- [ ] Reconfigure flow updates connections; Options flow updates tuning
+- [ ] `hassfest` config flow schema matches `strings.json` / `translations/en.json`
 
 ---
 
@@ -193,12 +250,13 @@ ha_liquidai/
 ```python
 @dataclass
 class LlmBackend:
-    base_url: str          # http://192.168.10.31:9292/v1
-    model: str             # unsloth/gemma-4-26B-A4B-it-GGUF:IQ4_XS
-    api_key: str | None
-    max_tokens: int = 4096
-    temperature: float = 0.3
-    timeout: float = 120.0
+    base_url: str          # from config_entry: llm_base_url / action_llm_base_url
+    model: str             # from config_entry: llm_model / action_llm_model
+    api_key: str | None    # from config_entry: llm_api_key
+    max_tokens: int        # from config_entry: llm_max_tokens
+    temperature: float     # from config_entry: llm_temperature / action_llm_temperature
+    timeout: float         # from config_entry: llm_timeout
+    enable_thinking: bool  # from config_entry: llm_enable_thinking
 
 async def chat_completion(
     backend: LlmBackend,
@@ -216,20 +274,21 @@ async def chat_completion(
 
 #### 4b. Context builder (`context.py`)
 
-Port logic from `ha_liquidai_n8n/scripts/agent_input_code.js`:
+Port logic from `ha_liquidai_n8n/scripts/agent_input_code.js` where it helps the **model** choose tools (not to bypass the LLM):
 
 | Function | Purpose |
 |----------|---------|
 | `parse_exposed_entities()` | HA exposed entity list → prompt block |
-| `is_affirmative()` / `is_news_query()` / `is_device_action()` | Inject tool hints |
-| `entity_matches_query()` | Skip search when exposed entity fits |
-| `build_system_message()` | Base prompt + tool_context + route-specific hints |
+| `entity_matches_query()` | Optional hint when exposed entity fits query |
+| `build_system_message()` | Base prompt + MCP/HA tool instructions |
+
+Tool instructions live in the system prompt and MCP integration layer — the LLM decides when to call `news_curate`, mail tools, HA services, etc. **No special news route or MCP-only bypass in Phase 4.**
 
 Hints to embed (learned from n8n production):
 
 - **callTool shape:** top-level `toolName` + flat `arguments`; never `value`, never nested `toolName`
 - **Cover/door:** `open_cover` / `close_cover`, not `open`
-- **News:** `mcp_news__news_curate` only; never SearXNG / `searchToolsForDomain`
+- **News:** prefer `mcp_news__news_curate` via MCP; document in system prompt — routing is the model’s job, not a hard-coded branch
 - **Email count:** `imap_mailbox_status {"mailbox":"INBOX"}`
 - **Email dates:** `imap_search_messages` with flat fields + required `mailbox`
 
@@ -267,21 +326,13 @@ async def run_agent(
     hass: HomeAssistant,
     user_input: ConversationInput,
     backend: LlmBackend,
-    route: TaskRoute,
     max_iterations: int = 8,
 ) -> AsyncGenerator[str, None]:
-    if route == TaskRoute.NEWS:
-        brief = await mcp.call_tool("mcp_news__news_curate", {})
-        messages = build_news_summarize_messages(user_input, brief)
-        async for delta in llm.stream(messages, backend=route.summarize_backend):
-            yield delta
-        return
-
-    messages = build_messages(user_input, route)
-    tools = tools_for_route(route)
+    messages = build_messages(user_input)
+    tools = all_tools()  # MCP meta-tool(s) + optional native HA tools
 
     for _ in range(max_iterations):
-        result = await llm.chat(messages, tools=tools, backend=route.backend)
+        result = await llm.chat(messages, tools=tools, backend=backend)
         if not result.tool_calls:
             async for delta in stream_or_yield(result.content):
                 yield delta
@@ -290,6 +341,8 @@ async def run_agent(
             output = await execute_tool(hass, call)
             messages.append(tool_result_message(call, output))
 ```
+
+News, email, device control, and general chat all use this same loop. Correct tool choice (e.g. `mcp_news__news_curate` vs search) is enforced via **system prompt + MCP tool descriptions**, not integration-side topic routing.
 
 #### 4e. Conversation platform (`conversation.py`)
 
@@ -307,90 +360,89 @@ async def run_agent(
 **Exit criteria**
 
 - [ ] “Turn off dining room lights” with exposed entity — one tool call, ~7 s
-- [ ] “Yes” after news offer — `news_curate`, no SearXNG error
+- [ ] “What’s the news?” — model calls `news_curate` (or other MCP news tools) via normal tool loop
+- [ ] “Yes” after assistant offered news — model follows up with appropriate MCP tool call
 - [ ] “Open Jonathans patio door” — search + `open_cover` when entity not exposed
 - [ ] Multi-turn email follow-up works
 - [ ] Text streaming visible in Assist
 - [ ] Webhook Conversation + n8n agent webhook **not required**
+- [ ] All LLM/MCP/agent settings read from config entry (no hardcoded model URLs in runtime modules)
+
+#### 4g. Config flow extensions (`config_flow.py`)
+
+Extend the existing multi-step flow per **UI configuration** above:
+
+1. **Step 3 — LLM:** URL, model, API key, max tokens, temperature, timeout, enable thinking; validate with `/v1/models` or test completion
+2. **Step 4 — MCP:** URL, bearer token, timeout, optional health URL; validate health + initialize
+3. **Step 2 — Prompts:** add `agent_system_prompt`, `tool_instructions`
+4. **Step 5 — Agent:** max iterations, history turns, enable streaming
+5. **`async_step_reconfigure`:** LiquidAI URL, LLM URL, MCP URL, tokens (migration without YAML)
+6. **Options flow:** audio tuning ✅; Phase 5 adds action-backend toggles
+
+**Exit criteria (config flow)**
+
+- [ ] New install completes all steps from UI only
+- [ ] Changing LLM model or MCP URL in UI takes effect after reload
+- [ ] Existing STT/TTS entry can be reconfigured to add agent settings
 
 ---
 
 ### Phase 5 — Multi-model router + MCP client (2–3 days)
 
-**Scope:** Route tasks to different LLM backends; robust MCP Proxy client.
+**Scope:** Optional routing to different LLM backends for latency/reliability; robust MCP Proxy client. **Not** topic-specific bypasses (news, email, etc.) — those stay in the model + MCP tool surface from Phase 4.
 
-#### 5a. Task routes (`router.py`)
+#### 5a. Task routes (`router.py`) — optional, Phase 5+
+
+Use routing only for **backend selection** (e.g. lower temperature / smaller model for device commands), not to skip the LLM for specific intents.
 
 ```python
 class TaskRoute(StrEnum):
-    NEWS = "news"              # MCP news_curate → optional summarize LLM
     HA_ACTION = "ha_action"  # tool-focused, low temperature
-    EMAIL = "email"            # structured MCP mail tools
-    CHAT = "chat"              # general Q&A, main model
+    CHAT = "chat"            # general Q&A, main model
 
 @dataclass
 class RouteConfig:
     route: TaskRoute
-    backend: LlmBackend | None   # None = MCP-only path
+    backend: LlmBackend
     max_iterations: int
     allow_mcp: bool
     allow_hass_native: bool
 ```
 
-**Classifier (Phase 5a — heuristic first):**
+**Classifier (Phase 5 — heuristic first, optional):**
 
 ```python
 def classify(text: str, history: list, exposed: list) -> TaskRoute:
-    if is_affirmative(text) and last_turn_offered_news(history):
-        return TaskRoute.NEWS
-    if is_news_query(text):
-        return TaskRoute.NEWS
-    if is_email_query(text):
-        return TaskRoute.EMAIL
     if is_device_action(text):
         return TaskRoute.HA_ACTION
     return TaskRoute.CHAT
 ```
+
+Do **not** add `TaskRoute.NEWS`, `TaskRoute.EMAIL`, or other topic routes that call MCP before/alongside the LLM. News and mail are ordinary tool calls the model makes inside `run_agent()`.
 
 **Optional Phase 5b — classifier model:**
 
 - Tiny model or 1-shot LLM call returning JSON `{"route":"ha_action"}`
 - Configurable in config flow as “router model” separate from main model
 
-#### 5b. Model router config (config flow / YAML)
+#### 5b. Model router config (config flow options only)
 
-| Setting | Default | Used for |
-|---------|---------|----------|
-| `llm_main_url` | `http://192.168.10.31:9292/v1` | Chat, complex replies |
-| `llm_main_model` | `unsloth/gemma-4-26B-A4B-it-GGUF:IQ4_XS` | |
-| `llm_action_url` | same as main (or separate) | HA device commands |
-| `llm_action_model` | same or smaller Q4 model | Lower latency |
-| `llm_action_temperature` | `0.1` | Reliable tool JSON |
-| `llm_summarize_url` | same as main | Post-news_curate summary |
-| `llm_summarize_model` | same or smaller | |
-| `llm_max_tokens` | `4096` | |
-| `enable_thinking` | `false` | Voice latency |
-| `max_agent_iterations` | `8` | Per route override allowed |
+All router settings are **options-flow** fields (see UI configuration table). No `configuration.yaml`, no hardcoded backend map in `router.py`.
+
+| Setting | Default | UI location |
+|---------|---------|-------------|
+| `use_action_backend` | `false` | Options → Router |
+| `action_llm_base_url` | copy of `llm_base_url` | Options (shown when separate action model enabled) |
+| `action_llm_model` | copy of `llm_model` | Options |
+| `action_llm_temperature` | `0.1` | Options |
 
 Example per-route map in `const.py`:
 
 ```python
 DEFAULT_ROUTE_BACKENDS = {
-    TaskRoute.NEWS: RouteConfig(
-        route=TaskRoute.NEWS,
-        backend=None,  # MCP only, then summarize_backend
-        max_iterations=2,
-        allow_mcp=True,
-        allow_hass_native=False,
-    ),
-    TaskRoute.HA_ACTION: RouteConfig(
-        route=TaskRoute.HA_ACTION,
-        backend=LlmBackendRef("action"),
-        max_iterations=4,
-        allow_mcp=True,
-        allow_hass_native=True,
-    ),
-    ...
+    # Loaded at runtime from config_entry.options — not fixed host/model strings
+    TaskRoute.HA_ACTION: RouteConfig(...),
+    TaskRoute.CHAT: RouteConfig(...),
 }
 ```
 
@@ -417,13 +469,14 @@ class McpProxyClient:
         ...
 ```
 
-**Config:**
+**Config:** all values from config entry (see UI configuration table).
 
-| Setting | Default |
-|---------|---------|
-| `mcp_url` | `http://192.168.10.31:2222/mcp` |
-| `mcp_bearer_token` | from config flow (password field) |
-| `mcp_timeout` | `120` s |
+| Setting | Config key | Default |
+|---------|------------|---------|
+| MCP URL | `mcp_url` | `http://192.168.10.31:2222/mcp` |
+| MCP bearer token | `mcp_bearer_token` | (user-provided) |
+| MCP timeout | `mcp_timeout` | `120` s |
+| MCP health URL | `mcp_health_url` | derived from MCP URL host |
 
 **Health check:** `GET http://192.168.10.31:2222/api/health` during config flow validation.
 
@@ -431,10 +484,9 @@ class McpProxyClient:
 
 **Exit criteria**
 
-- [ ] Router sends news queries to MCP-only path (no SearXNG)
-- [ ] HA actions use action backend (configurable separate model)
+- [ ] Optional action route uses action backend when configured (device commands only)
 - [ ] MCP client passes config flow validation with bearer token
-- [ ] `scripts/smoke_test_mcp.py` calls `news_curate` and `ha_call_service` shape
+- [ ] `scripts/smoke_test_mcp.py` calls `news_curate` and `ha_call_service` shape via direct MCP (smoke test), not via a news bypass in the agent
 
 ---
 
@@ -489,7 +541,7 @@ class McpProxyClient:
 |-----------------------------|--------|
 | `parseExposedEntities` | `parse_exposed_entities` |
 | `formatExposedEntities` | `format_exposed_entities` |
-| `isAffirmative` / `isNewsQuery` / `isDeviceActionQuery` | same |
+| `is_affirmative` / `is_news_query` / `is_device_action` | optional hints in `build_system_message()` only — not route classifiers |
 | `entityMatchesQuery` | `entity_matches_query` |
 | `tool_context` injection | `build_tool_context()` |
 
@@ -512,18 +564,17 @@ Port `mcpAgentHint` from `simple_n8n_workflow_hybrid.sdk.js` as `DEFAULT_TOOL_IN
 
 ## Config reference (full integration)
 
-| Setting | Default | Phase |
-|---------|---------|-------|
-| LiquidAI URL | `http://192.168.10.31:8811` | 1 ✅ |
-| TTS system prompt | `Perform TTS. Use the US female voice.` | 1 ✅ |
-| TTS keep edge / gap ms | 100 / 5 | 1 ✅ |
-| LLM main URL / model | `:9292/v1`, Gemma | 4 |
-| LLM action URL / model | same or separate | 5 |
-| LLM temperature (action / chat) | 0.1 / 0.3 | 5 |
-| MCP URL / bearer token | `:2222/mcp` | 5 |
-| Max agent iterations | 8 | 4 |
-| Enable thinking | false | 5 |
-| Conversation history turns | 10 | 4 |
+See **UI configuration** for the authoritative field list. Summary:
+
+| Area | Configurable in UI | Phase |
+|------|-------------------|-------|
+| LiquidAI URL, TTS/ASR prompts, audio tuning | ✅ Setup + Options | 1–3 ✅ |
+| LLM URL, model, key, tokens, temperature, thinking | Setup + Reconfigure | 4 |
+| MCP URL, token, health URL, timeout | Setup + Reconfigure | 4 |
+| Agent prompt, tool instructions, iterations, history, streaming | Setup + Options | 4 |
+| Optional action model (URL, model, temperature) | Options | 5 |
+
+**Not allowed:** `configuration.yaml` keys, environment variables, or Python constants used as runtime endpoints (defaults for forms only).
 
 ---
 
@@ -538,7 +589,7 @@ Port `mcpAgentHint` from `simple_n8n_workflow_hybrid.sdk.js` as `DEFAULT_TOOL_IN
 
 - [ ] Light on/off with exposed entity — 1 MCP or native call
 - [ ] Cover open without exposed entity — search + open_cover
-- [ ] News / “Yes” after offer — news_curate, no SearXNG
+- [ ] “What’s the news?” / “Yes” after news offer — model selects MCP news tools in agent loop
 - [ ] Email unread count
 - [ ] Email “from when” follow-up
 - [ ] Streaming text in Assist debug
@@ -546,8 +597,7 @@ Port `mcpAgentHint` from `simple_n8n_workflow_hybrid.sdk.js` as `DEFAULT_TOOL_IN
 
 ### Phase 5 (Router + MCP)
 
-- [ ] News route skips tool discovery
-- [ ] Action route uses action model when configured separately
+- [ ] Action route (if enabled) uses action model for device commands only
 - [ ] MCP bearer auth failure shows friendly error
 - [ ] Malformed tool args caught before MCP call (validation layer)
 
@@ -555,6 +605,7 @@ Port `mcpAgentHint` from `simple_n8n_workflow_hybrid.sdk.js` as `DEFAULT_TOOL_IN
 
 - [ ] Full voice pipeline without n8n
 - [ ] Time to first TTS audio on long reply < 4 s after first sentence
+- [ ] Pointing all three backends at alternate hosts/models via UI only (no code change)
 
 ---
 
@@ -566,7 +617,8 @@ Port `mcpAgentHint` from `simple_n8n_workflow_hybrid.sdk.js` as `DEFAULT_TOOL_IN
 | Context window exceeded (many exposed entities) | Cap exposed entities in docs; compress history in memory.py |
 | MCP proxy down | Config flow health check; graceful degradation message |
 | HA conversation API changes | Pin minimum HA version; follow `AbstractConversationAgent` docs |
-| Multi-model config complexity | Sensible defaults (single backend); advanced section in config flow |
+| Multi-model config complexity | All backends in config flow with defaults; optional action model behind one toggle |
+| Hardcoded endpoints slip in during Phase 4 | Code review + lint/grep CI check for `:8811`, `:9292`, `:2222` in non-const modules |
 
 ---
 
@@ -594,10 +646,10 @@ Week 2
 | MCP tool arg errors | Frequent | Rare (validated in Python) |
 | Time to first TTS audio | ~15–20 s | < 4 s after first sentence ✅ (TTS done) |
 | Moving parts for Assist | HA + Webhook Conv + n8n + 3 services | HA + 3 services |
-| Multi-model | Single Gemma | Per-route backends |
+| Multi-model | Single Gemma | Optional per-style backends (action vs chat); tools unified |
 
 ---
 
 ## Next action
 
-**Phase 4:** Add `conversation.py`, `agent.py`, `llm_client.py`, and the native tool loop to replace n8n `/webhook/agent`.
+**Phase 4:** Add `conversation.py`, `agent.py`, `llm_client.py`, config flow steps for LLM/MCP/agent, and the native tool loop to replace n8n `/webhook/agent`. All models and paths must come from the UI config map above.
