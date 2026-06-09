@@ -42,7 +42,7 @@ Assist sends raw PCM; the integration wraps it in WAV before calling LiquidAI AS
 
 ## Verify streaming TTS
 
-Ask a long question in Assist. In pipeline debug, look for `chat_log_delta` and `tts_start_streaming: true`.
+Ask a long question in Assist (roughly 60+ characters of assistant reply). In pipeline debug, look for `stream_response: true`, `chat_log_delta`, and `tts_start_streaming: true`.
 
 ### TTS tuning
 
