@@ -24,7 +24,7 @@ flowchart TB
   end
 
   subgraph Backends
-    LAI["LiquidAI :8811"]
+    LAI["LiquidAI :8811\nASR + TTS + speaker/embed"]
     LLM["llama.cpp :9292"]
     MCP["MCP Proxy :2222"]
   end
@@ -70,6 +70,16 @@ ha_liquidai/
 - [x] `SpeechToTextEntity`, PCM→WAV wrap for Assist pipeline
 - [x] Document pipeline wiring with [ha_agent](../ha_agent)
 
+### Phase 4 — Speaker embedding bridge (planned)
+
+Supports [ha_agent Phase 9b](https://github.com/holger81/ha_agent/blob/main/docs/agent-voice-inference-plan.md)
+voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md).
+
+- [ ] Inference box: `POST /v1/speaker/embed` (Sherpa-ONNX on `:8811`)
+- [ ] `client.embed_speaker()` + parallel ASR/embed in `stt.py`
+- [ ] `voice_cache.py` — short-lived `hass.data` bridge to ha_agent
+- [ ] Tests + config flag `speaker_embed_enabled`
+
 ## Assist pipeline wiring
 
 | Stage | Integration |
@@ -82,4 +92,5 @@ See [docs/assist-setup.md](docs/assist-setup.md).
 
 ## Next action
 
-Keep LiquidAI STT/TTS stable; track agent work in **ha_agent** PLAN.md.
+Implement Phase 4 speaker embed bridge — [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md).
+Track ha_agent clustering in [ha_agent PLAN.md](https://github.com/holger81/ha_agent/blob/main/PLAN.md) Phase 9b.

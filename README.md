@@ -12,6 +12,7 @@ Replaces n8n Webhook STT/TTS from [ha_liquidai_n8n](https://github.com/holger81/
 |---------|--------|
 | TTS (1-shot + streaming) | **Done** |
 | STT → LiquidAI `/v1/asr` | **Done** |
+| Speaker embed → `/v1/speaker/embed` | **Planned** — [plan](docs/voice-speaker-embed-plan.md) |
 | Conversation agent | **[ha_agent](https://github.com/holger81/ha_agent)** |
 
 See [PLAN.md](PLAN.md) for scope and [ha_agent PLAN](https://github.com/holger81/ha_agent/blob/main/PLAN.md) for the agent roadmap.
@@ -48,6 +49,7 @@ pytest tests/
 ## Docs
 
 - [Assist pipeline setup](docs/assist-setup.md)
+- [Voice speaker embed plan](docs/voice-speaker-embed-plan.md) (Phase 4 / ha_agent 9b)
 - [Migration from n8n STT](docs/migration-from-n8n-stt.md)
 - [Migration from n8n TTS](docs/migration-from-n8n-tts.md)
 
