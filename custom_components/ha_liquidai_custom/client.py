@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from homeassistant.exceptions import HomeAssistantError
@@ -11,6 +11,7 @@ from .const import (
     DEFAULT_ASR_SYSTEM_PROMPT,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
+    EMBED_SOFT_QUALITIES,
     LOGGER,
 )
 
@@ -27,12 +28,17 @@ class LiquidAiTtsClient:
         base_url: str,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         timeout: int = DEFAULT_TIMEOUT,
+        speaker_embed_timeout: int | None = None,
     ) -> None:
         """Initialize the client."""
         self._session = session
         self._base_url = base_url.rstrip("/")
         self._system_prompt = system_prompt
         self._timeout = aiohttp.ClientTimeout(total=timeout)
+        embed_timeout = (
+            speaker_embed_timeout if speaker_embed_timeout is not None else timeout
+        )
+        self._speaker_embed_timeout = aiohttp.ClientTimeout(total=embed_timeout)
 
     @property
     def base_url(self) -> str:
@@ -138,3 +144,76 @@ class LiquidAiTtsClient:
             len(text),
         )
         return text
+
+    async def embed_speaker(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str = "audio/wav",
+    ) -> dict[str, Any]:
+        """Return speaker embedding payload from /v1/speaker/embed."""
+        if not audio_bytes:
+            raise HomeAssistantError("No audio for speaker embedding")
+
+        filename = "audio.ogg" if "ogg" in mime_type else "audio.wav"
+        form = aiohttp.FormData()
+        form.add_field("type", mime_type)
+        form.add_field(
+            "audio",
+            audio_bytes,
+            filename=filename,
+            content_type=mime_type,
+        )
+
+        try:
+            async with self._session.post(
+                f"{self._base_url}/v1/speaker/embed",
+                data=form,
+                timeout=self._speaker_embed_timeout,
+            ) as response:
+                if response.status != 200:
+                    body = await response.text()
+                    raise HomeAssistantError(
+                        "LiquidAI speaker embed failed "
+                        f"(HTTP {response.status}): {body[:200]}"
+                    )
+                payload = await response.json(content_type=None)
+        except TimeoutError as err:
+            raise HomeAssistantError(
+                "LiquidAI speaker embed request timed out"
+            ) from err
+        except aiohttp.ClientError as err:
+            raise HomeAssistantError(
+                f"LiquidAI speaker embed request failed: {err}"
+            ) from err
+
+        if not isinstance(payload, dict):
+            raise HomeAssistantError("LiquidAI speaker embed returned invalid JSON")
+
+        embedding = payload.get("embedding")
+        quality = str(payload.get("quality") or "ok")
+        if isinstance(embedding, list) and embedding:
+            if not all(isinstance(value, (int, float)) for value in embedding):
+                raise HomeAssistantError(
+                    "LiquidAI speaker embed returned non-numeric embedding"
+                )
+            LOGGER.debug(
+                "Embedded %d bytes to %d-d vector (quality=%s)",
+                len(audio_bytes),
+                len(embedding),
+                quality,
+            )
+            return payload
+
+        if quality in EMBED_SOFT_QUALITIES:
+            LOGGER.debug(
+                "Speaker embed returned soft quality=%s without vector",
+                quality,
+            )
+            return {
+                **payload,
+                "embedding": [],
+                "quality": quality,
+            }
+
+        raise HomeAssistantError("LiquidAI speaker embed returned empty embedding")

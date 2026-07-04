@@ -102,3 +102,81 @@ async def test_transcribe_raises_on_http_error() -> None:
 
     with pytest.raises(client.HomeAssistantError, match="LiquidAI ASR failed"):
         await liquid_client.transcribe(b"RIFF")
+
+
+@pytest.mark.asyncio
+async def test_embed_speaker_parses_embedding_vector() -> None:
+    """Speaker embed JSON returns a validated embedding payload."""
+    response = AsyncMock()
+    response.status = 200
+    response.json = AsyncMock(
+        return_value={
+            "embedding": [0.01] * 192,
+            "model": "sherpa-onnx-3dspeaker",
+            "quality": "ok",
+            "duration_ms": 1500,
+        }
+    )
+
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=None)
+
+    session = MagicMock()
+    session.post = MagicMock(return_value=context)
+
+    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    result = await liquid_client.embed_speaker(b"RIFF", mime_type="audio/wav")
+
+    assert len(result["embedding"]) == 192
+    assert result["model"] == "sherpa-onnx-3dspeaker"
+    session.post.assert_called_once()
+    assert session.post.call_args.args[0] == "http://example:8811/v1/speaker/embed"
+
+
+@pytest.mark.asyncio
+async def test_embed_speaker_raises_on_empty_embedding() -> None:
+    """Empty embedding vectors raise HomeAssistantError."""
+    response = AsyncMock()
+    response.status = 200
+    response.json = AsyncMock(return_value={"embedding": []})
+
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=None)
+
+    session = MagicMock()
+    session.post = MagicMock(return_value=context)
+
+    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+
+    with pytest.raises(client.HomeAssistantError, match="empty embedding"):
+        await liquid_client.embed_speaker(b"RIFF")
+
+
+@pytest.mark.asyncio
+async def test_embed_speaker_accepts_soft_quality_without_vector() -> None:
+    """Soft quality responses degrade without raising."""
+    response = AsyncMock()
+    response.status = 200
+    response.json = AsyncMock(
+        return_value={
+            "embedding": [],
+            "model": "sherpa-onnx-3dspeaker",
+            "quality": "too_short",
+            "duration_ms": 400,
+        }
+    )
+
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=None)
+
+    session = MagicMock()
+    session.post = MagicMock(return_value=context)
+
+    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    result = await liquid_client.embed_speaker(b"RIFF")
+
+    assert result["quality"] == "too_short"
+    assert result["embedding"] == []

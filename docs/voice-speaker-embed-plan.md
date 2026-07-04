@@ -14,7 +14,7 @@ reading the full ha_agent design history.
 | **B–D** — client, STT, cache | [ha_liquidai](https://github.com/holger81/ha_liquidai) | `~/Projects/ha_liquidai` |
 | **E** — clustering + conversation | [ha_agent](https://github.com/holger81/ha_agent) | `~/Projects/ha_agent` |
 
-**Status (2026-07):** Part A **shipped** (API + tests in liquidai-audio). Parts B–D and E **pending**.
+**Status (2026-07):** Part A **shipped** (API + tests in liquidai-audio). Parts B–D **shipped** in ha_liquidai v0.4.0. Part E **pending** in ha_agent.
 
 ---
 
@@ -118,7 +118,7 @@ Same semantics; one round trip. Not required for MVP.
 
 ---
 
-## Part B — ha_liquidai client (pending)
+## Part B — ha_liquidai client ✅
 
 **Repo:** `~/Projects/ha_liquidai`  
 **File:** `custom_components/ha_liquidai_custom/client.py`
@@ -148,7 +148,7 @@ async def embed_speaker(
 
 ---
 
-## Part C — ha_liquidai STT (pending)
+## Part C — ha_liquidai STT ✅
 
 **Repo:** `~/Projects/ha_liquidai`  
 **File:** `custom_components/ha_liquidai_custom/stt.py`
@@ -171,7 +171,7 @@ After success, call voice cache store (Part D).
 
 ---
 
-## Part D — Voice turn cache (HA side channel, pending)
+## Part D — Voice turn cache (HA side channel) ✅
 
 **Repo:** `~/Projects/ha_liquidai`  
 **New module:** `custom_components/ha_liquidai_custom/voice_cache.py`
@@ -265,11 +265,11 @@ Mock HTTP; no live inference box in CI.
 
 ### ha_liquidai
 
-- [ ] `client.embed_speaker()`
-- [ ] STT parallel ASR + embed
-- [ ] `voice_cache.py` + tests
-- [ ] Config flag `speaker_embed_enabled`
-- [ ] Bump manifest version; deploy to HA
+- [x] `client.embed_speaker()`
+- [x] STT parallel ASR + embed
+- [x] `voice_cache.py` + tests
+- [x] Config flag `speaker_embed_enabled`
+- [x] Bump manifest version; deploy to HA
 
 ### ha_agent (separate repo)
 
@@ -296,7 +296,7 @@ Mock HTTP; no live inference box in CI.
 | Edit | `Dockerfile`, `docker-compose.yaml`, `README.md` |
 | Add | `tests/test_speaker_embed.py`, `models/speaker/.gitkeep` |
 
-### Parts B–D — `~/Projects/ha_liquidai` (pending)
+### Parts B–D — `~/Projects/ha_liquidai` ✅
 
 | Action | Path |
 |--------|------|

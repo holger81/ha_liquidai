@@ -14,7 +14,9 @@
         "data": {
           "system_prompt": "TTS system prompt",
           "asr_system_prompt": "ASR system prompt",
-          "timeout": "Timeout (seconds)"
+          "timeout": "Timeout (seconds)",
+          "speaker_embed_enabled": "Enable speaker embedding",
+          "speaker_embed_timeout": "Speaker embed timeout (seconds)"
         }
       },
       "advanced": {

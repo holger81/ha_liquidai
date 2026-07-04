@@ -71,7 +71,7 @@ ha_liquidai/
 - [x] `SpeechToTextEntity`, PCM→WAV wrap for Assist pipeline
 - [x] Document pipeline wiring with [ha_agent](../ha_agent)
 
-### Phase 4 — Speaker embedding bridge (in progress)
+### Phase 4 — Speaker embedding bridge
 
 Supports [ha_agent Phase 9b](../ha_agent/docs/agent-voice-inference-plan.md)
 voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md).
