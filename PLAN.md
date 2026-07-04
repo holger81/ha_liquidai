@@ -73,7 +73,7 @@ ha_liquidai/
 
 ### Phase 4 — Speaker embedding bridge
 
-Supports [ha_agent Phase 9b](../ha_agent/docs/agent-voice-inference-plan.md)
+Supports [ha_agent Phase 9b](https://github.com/holger81/ha_agent/blob/main/docs/agent-voice-inference-plan.md)
 voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md).
 
 **Part A — inference box** (liquidai-audio-docker, shipped 2026-07):
@@ -101,4 +101,4 @@ See [docs/assist-setup.md](docs/assist-setup.md).
 
 ## Next action
 
-Deploy Sherpa model on `.31` and smoke-test `POST /v1/speaker/embed`. Then implement ha_agent Phase 9b clustering — see [ha_agent PLAN.md](../ha_agent/PLAN.md).
+Deploy Sherpa model on `.31` and smoke-test `POST /v1/speaker/embed`. Then implement ha_agent Phase 9b clustering — see [ha_agent PLAN.md](https://github.com/holger81/ha_agent/blob/main/PLAN.md).
