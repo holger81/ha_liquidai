@@ -17,6 +17,7 @@ from .const import (
 )
 
 DATA_VOICE_TURNS = "ha_liquidai_voice_turns"
+DEFAULT_SATELLITE_KEY = "__default__"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class VoiceTurnPayload:
     duration_ms: int | None
     created_at: float
     match_key: str
+    satellite_id: str | None = None
 
 
 def normalize_voice_text(text: str) -> str:
@@ -37,15 +39,19 @@ def normalize_voice_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
-def make_voice_match_key(text: str) -> str:
+def make_voice_match_key(text: str, *, satellite_id: str | None = None) -> str:
     """Build a stable cache key from normalized transcript text."""
-    digest = hashlib.sha256(normalize_voice_text(text).encode()).hexdigest()
+    normalized = normalize_voice_text(text)
+    scope = satellite_id or DEFAULT_SATELLITE_KEY
+    digest = hashlib.sha256(f"{scope}:{normalized}".encode()).hexdigest()
     return digest[:16]
 
 
 def build_voice_turn_payload(
     text: str,
     embed_result: dict[str, Any] | None,
+    *,
+    satellite_id: str | None = None,
 ) -> VoiceTurnPayload:
     """Build a cache payload from ASR text and optional embed response."""
     if embed_result is None:
@@ -56,7 +62,8 @@ def build_voice_turn_payload(
             quality="skipped",
             duration_ms=None,
             created_at=time.monotonic(),
-            match_key=make_voice_match_key(text),
+            match_key=make_voice_match_key(text, satellite_id=satellite_id),
+            satellite_id=satellite_id,
         )
 
     embedding_raw = embed_result.get("embedding")
@@ -74,7 +81,8 @@ def build_voice_turn_payload(
         quality=str(embed_result.get("quality") or "ok"),
         duration_ms=int(duration_ms) if duration_ms is not None else None,
         created_at=time.monotonic(),
-        match_key=make_voice_match_key(text),
+        match_key=make_voice_match_key(text, satellite_id=satellite_id),
+        satellite_id=satellite_id,
     )
 
 
@@ -100,10 +108,24 @@ def store_voice_turn(hass: HomeAssistant, payload: VoiceTurnPayload) -> None:
     prune_voice_turns(hass, now=payload.created_at)
     _voice_turn_store(hass).append(payload)
     LOGGER.debug(
-        "Stored voice turn match_key=%s quality=%s",
+        "Stored voice turn match_key=%s satellite=%s quality=%s",
         payload.match_key,
+        payload.satellite_id,
         payload.quality,
     )
+
+
+def _payload_matches_text(payload: VoiceTurnPayload, normalized: str) -> bool:
+    return normalize_voice_text(payload.text) == normalized
+
+
+def _payload_matches_satellite(
+    payload: VoiceTurnPayload,
+    satellite_id: str | None,
+) -> bool:
+    if satellite_id:
+        return payload.satellite_id in {satellite_id, None}
+    return True
 
 
 def pop_voice_turn(
@@ -111,19 +133,22 @@ def pop_voice_turn(
     *,
     text: str,
     match_key: str | None = None,
+    satellite_id: str | None = None,
 ) -> VoiceTurnPayload | None:
     """Pop a cache entry by normalized text and optional match key."""
     now = time.monotonic()
     prune_voice_turns(hass, now=now)
     normalized = normalize_voice_text(text)
-    key = match_key or make_voice_match_key(text)
+    key = match_key or make_voice_match_key(text, satellite_id=satellite_id)
     store = _voice_turn_store(hass)
 
     for index in range(len(store) - 1, -1, -1):
         payload = store[index]
         if payload.match_key != key:
             continue
-        if normalize_voice_text(payload.text) != normalized:
+        if not _payload_matches_text(payload, normalized):
+            continue
+        if satellite_id and payload.satellite_id not in {satellite_id, None}:
             continue
         store.pop(index)
         return payload
@@ -135,6 +160,7 @@ def pop_matching_voice_turn(
     hass: HomeAssistant,
     *,
     user_text: str,
+    satellite_id: str | None = None,
 ) -> VoiceTurnPayload | None:
     """Return the most recent matching voice turn within the match window."""
     now = time.monotonic()
@@ -146,16 +172,26 @@ def pop_matching_voice_turn(
     store = _voice_turn_store(hass)
     best_index: int | None = None
     best_created_at = -1.0
+    best_is_exact_satellite = False
 
     for index, payload in enumerate(store):
-        if normalize_voice_text(payload.text) != normalized:
+        if not _payload_matches_text(payload, normalized):
             continue
         age = now - payload.created_at
         if age > VOICE_TURN_MATCH_WINDOW_SECONDS:
             continue
-        if payload.created_at > best_created_at:
-            best_created_at = payload.created_at
-            best_index = index
+        exact_satellite = bool(
+            satellite_id and payload.satellite_id == satellite_id
+        )
+        if not _payload_matches_satellite(payload, satellite_id):
+            continue
+        if payload.created_at > best_created_at or (
+            payload.created_at == best_created_at and exact_satellite
+        ):
+            if exact_satellite or not best_is_exact_satellite:
+                best_created_at = payload.created_at
+                best_index = index
+                best_is_exact_satellite = exact_satellite
 
     if best_index is None:
         return None

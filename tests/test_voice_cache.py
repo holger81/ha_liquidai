@@ -91,6 +91,45 @@ def test_store_and_pop_matching_voice_turn() -> None:
     assert voice_cache.pop_matching_voice_turn(hass, user_text="hello there") is None
 
 
+def test_pop_matching_voice_turn_prefers_satellite() -> None:
+    """Exact satellite match wins over a legacy text-only entry."""
+    hass = _fake_hass()
+    now = time.monotonic()
+    legacy = voice_cache.VoiceTurnPayload(
+        text="Turn on the lights",
+        embedding=[0.1],
+        model="sherpa-onnx-3dspeaker",
+        quality="ok",
+        duration_ms=900,
+        created_at=now,
+        match_key=voice_cache.make_voice_match_key("Turn on the lights"),
+        satellite_id=None,
+    )
+    scoped = voice_cache.VoiceTurnPayload(
+        text="Turn on the lights",
+        embedding=[0.2],
+        model="sherpa-onnx-3dspeaker",
+        quality="ok",
+        duration_ms=900,
+        created_at=now + 0.01,
+        match_key=voice_cache.make_voice_match_key(
+            "Turn on the lights",
+            satellite_id="sat-kitchen",
+        ),
+        satellite_id="sat-kitchen",
+    )
+    voice_cache.store_voice_turn(hass, legacy)
+    voice_cache.store_voice_turn(hass, scoped)
+
+    matched = voice_cache.pop_matching_voice_turn(
+        hass,
+        user_text="turn on the lights",
+        satellite_id="sat-kitchen",
+    )
+
+    assert matched is scoped
+
+
 def test_prune_expired_voice_turns() -> None:
     """Expired entries are removed on store and pop."""
     hass = _fake_hass()

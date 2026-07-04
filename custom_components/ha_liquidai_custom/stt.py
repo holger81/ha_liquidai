@@ -177,7 +177,10 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         if self.speaker_embed_enabled and _is_embed_available(
             self.hass, self._entry.entry_id
         ):
-            self._safe_store_voice_turn(text, embed_result)
+            satellite_id = getattr(metadata, "satellite_id", None) or getattr(
+                metadata, "device_id", None
+            )
+            self._safe_store_voice_turn(text, embed_result, satellite_id=satellite_id)
 
         return SpeechResult(text, SpeechResultState.SUCCESS)
 
@@ -185,12 +188,18 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         self,
         text: str,
         embed_result: dict[str, Any] | None,
+        *,
+        satellite_id: str | None = None,
     ) -> None:
         """Store voice metadata without affecting STT success."""
         try:
             store_voice_turn(
                 self.hass,
-                build_voice_turn_payload(text, embed_result),
+                build_voice_turn_payload(
+                    text,
+                    embed_result,
+                    satellite_id=satellite_id,
+                ),
             )
         except Exception as err:
             LOGGER.debug("Voice turn cache store failed (ignored): %s", err)
