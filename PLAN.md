@@ -2,6 +2,7 @@
 
 Project root: `~/Projects/ha_liquidai`  
 Agent / conversation: [`~/Projects/ha_agent`](../ha_agent)  
+Inference box (ASR/TTS/speaker embed): [`liquidai-audio-docker`](https://github.com/holger81/liquidai-audio-docker) (`~/MeineDateien/Projekte/liquidai-audio`)  
 Legacy stack: `~/Projects/ha_liquidai_n8n` (n8n + Webhook Conversation — to be retired)
 
 ## Goal
@@ -70,15 +71,23 @@ ha_liquidai/
 - [x] `SpeechToTextEntity`, PCM→WAV wrap for Assist pipeline
 - [x] Document pipeline wiring with [ha_agent](../ha_agent)
 
-### Phase 4 — Speaker embedding bridge (planned)
+### Phase 4 — Speaker embedding bridge (in progress)
 
-Supports [ha_agent Phase 9b](https://github.com/holger81/ha_agent/blob/main/docs/agent-voice-inference-plan.md)
+Supports [ha_agent Phase 9b](../ha_agent/docs/agent-voice-inference-plan.md)
 voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md).
 
-- [ ] Inference box: `POST /v1/speaker/embed` (Sherpa-ONNX on `:8811`)
-- [ ] `client.embed_speaker()` + parallel ASR/embed in `stt.py`
-- [ ] `voice_cache.py` — short-lived `hass.data` bridge to ha_agent
-- [ ] Tests + config flag `speaker_embed_enabled`
+**Part A — inference box** (liquidai-audio-docker, shipped 2026-07):
+
+- [x] `POST /v1/speaker/embed` (Sherpa-ONNX on `:8811`) — code in `lfm2audio/speaker_embed.py`, `routes.py`
+- [ ] Deploy on `.31`: Sherpa ONNX in `models/speaker/`, rebuild container, smoke curl
+
+**Parts B–D — this repo** (`~/Projects/ha_liquidai`):
+
+- [x] `client.embed_speaker()` in `custom_components/ha_liquidai_custom/client.py`
+- [x] Parallel ASR + embed in `custom_components/ha_liquidai_custom/stt.py`
+- [x] `custom_components/ha_liquidai_custom/voice_cache.py` — short-lived `hass.data` bridge to ha_agent
+- [x] Config flag `speaker_embed_enabled` in `const.py` / `config_flow.py`
+- [x] Tests: `tests/test_client.py`, `tests/test_stt.py`, `tests/test_voice_cache.py`
 
 ## Assist pipeline wiring
 
@@ -92,5 +101,4 @@ See [docs/assist-setup.md](docs/assist-setup.md).
 
 ## Next action
 
-Implement Phase 4 speaker embed bridge — [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md).
-Track ha_agent clustering in [ha_agent PLAN.md](https://github.com/holger81/ha_agent/blob/main/PLAN.md) Phase 9b.
+Deploy Sherpa model on `.31` and smoke-test `POST /v1/speaker/embed`. Then implement ha_agent Phase 9b clustering — see [ha_agent PLAN.md](../ha_agent/PLAN.md).

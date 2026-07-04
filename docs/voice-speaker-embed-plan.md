@@ -6,6 +6,16 @@ support [ha_agent Phase 9b voice identity](https://github.com/holger81/ha_agent/
 This doc is self-contained: an agent or developer can implement from here without
 reading the full ha_agent design history.
 
+## Repository map (local)
+
+| Part | Repo | Path |
+|------|------|------|
+| **A** — `/v1/speaker/embed` | [liquidai-audio-docker](https://github.com/holger81/liquidai-audio-docker) | `~/MeineDateien/Projekte/liquidai-audio` |
+| **B–D** — client, STT, cache | [ha_liquidai](https://github.com/holger81/ha_liquidai) | `~/Projects/ha_liquidai` |
+| **E** — clustering + conversation | [ha_agent](https://github.com/holger81/ha_agent) | `~/Projects/ha_agent` |
+
+**Status (2026-07):** Part A **shipped** (API + tests in liquidai-audio). Parts B–D and E **pending**.
+
 ---
 
 ## Purpose
@@ -44,8 +54,9 @@ Assist pipeline (one utterance)
 
 ---
 
-## Part A — Inference box API
+## Part A — Inference box API ✅ (shipped)
 
+**Repo:** `~/MeineDateien/Projekte/liquidai-audio` — `lfm2audio/speaker_embed.py`, `routes.py`, `docker-compose.yaml`  
 **Host:** `192.168.10.31` (default LiquidAI base `http://192.168.10.31:8811`)
 
 ### New endpoint: `POST /v1/speaker/embed`
@@ -107,8 +118,9 @@ Same semantics; one round trip. Not required for MVP.
 
 ---
 
-## Part B — ha_liquidai client
+## Part B — ha_liquidai client (pending)
 
+**Repo:** `~/Projects/ha_liquidai`  
 **File:** `custom_components/ha_liquidai_custom/client.py`
 
 Add method:
@@ -136,8 +148,9 @@ async def embed_speaker(
 
 ---
 
-## Part C — ha_liquidai STT
+## Part C — ha_liquidai STT (pending)
 
+**Repo:** `~/Projects/ha_liquidai`  
 **File:** `custom_components/ha_liquidai_custom/stt.py`
 
 After `_prepare_wav_for_asr()`:
@@ -158,8 +171,9 @@ After success, call voice cache store (Part D).
 
 ---
 
-## Part D — Voice turn cache (HA side channel)
+## Part D — Voice turn cache (HA side channel, pending)
 
+**Repo:** `~/Projects/ha_liquidai`  
 **New module:** `custom_components/ha_liquidai_custom/voice_cache.py`
 
 Because HA STT cannot attach metadata to `SpeechResult`, store embeddings in
@@ -207,9 +221,9 @@ Coordinate import path with ha_agent (optional dependency: ha_agent imports from
 
 ---
 
-## Part E — ha_agent consumption
+## Part E — ha_agent consumption (pending)
 
-Implemented in **ha_agent** repo (not this repo). Contract for handoff:
+**Repo:** `~/Projects/ha_agent` — see [docs/agent-voice-inference-plan.md](../../ha_agent/docs/agent-voice-inference-plan.md). Contract for handoff:
 
 ```python
 # ha_agent/conversation.py (sketch)
@@ -241,10 +255,11 @@ Mock HTTP; no live inference box in CI.
 
 ## Part G — Rollout checklist
 
-### Inference box (`.31`)
+### Inference box (`.31`) — Part A
 
-- [ ] Download Sherpa speaker ONNX model to `/models/speaker/`
-- [ ] Implement `POST /v1/speaker/embed`
+- [x] Implement `POST /v1/speaker/embed` (liquidai-audio-docker, commit `f22c871`)
+- [ ] Download Sherpa speaker ONNX model to `models/speaker/` on inference host
+- [ ] Rebuild/restart container on `.31`
 - [ ] Smoke: `curl -F audio=@sample.wav http://192.168.10.31:8811/v1/speaker/embed`
 - [ ] Confirm p95 latency < 100 ms on representative WAV
 
@@ -270,7 +285,18 @@ Mock HTTP; no live inference box in CI.
 
 ---
 
-## File checklist (this repo)
+## File checklist
+
+### Part A — `~/MeineDateien/Projekte/liquidai-audio` ✅
+
+| Action | Path |
+|--------|------|
+| Add | `lfm2audio/speaker_embed.py` |
+| Edit | `lfm2audio/routes.py`, `lfm2audio/config.py`, `lfm2audio/main.py` |
+| Edit | `Dockerfile`, `docker-compose.yaml`, `README.md` |
+| Add | `tests/test_speaker_embed.py`, `models/speaker/.gitkeep` |
+
+### Parts B–D — `~/Projects/ha_liquidai` (pending)
 
 | Action | Path |
 |--------|------|
@@ -282,7 +308,6 @@ Mock HTTP; no live inference box in CI.
 | Add | `tests/test_voice_cache.py` |
 | Edit | `tests/test_client.py`, `tests/test_stt.py` |
 | Edit | `PLAN.md` — Phase 4 |
-| Edit | `README.md` — link to this doc |
 
 ---
 
