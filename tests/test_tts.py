@@ -43,9 +43,9 @@ class _FakeEncoderProcess:
             piece = bytes(self._pcm[:_FAKE_ENCODER_SLICE])
             del self._pcm[:_FAKE_ENCODER_SLICE]
             self._chunks_emitted += 1
-            self._out.put_nowait(
-                b"mp3:" + piece[:4] + len(piece).to_bytes(4, "little")
-            )
+            # Emit a sizeable fragment so the production first-chunk buffer
+            # (TTS_PCM_FIRST_MP3_BYTES) can fill during tests.
+            self._out.put_nowait(b"mp3:" + piece)
 
     async def drain(self) -> None:
         await asyncio.sleep(0)
@@ -55,9 +55,7 @@ class _FakeEncoderProcess:
             piece = bytes(self._pcm)
             self._pcm.clear()
             self._chunks_emitted += 1
-            self._out.put_nowait(
-                b"mp3:" + piece[:4] + len(piece).to_bytes(4, "little")
-            )
+            self._out.put_nowait(b"mp3:" + piece)
         self._out.put_nowait(None)
 
     async def wait_closed(self) -> None:
@@ -276,13 +274,14 @@ async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
     entity = _make_entity(
         {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
     )
-    frame = struct.pack("<h", 20000) * 2400  # 100 ms
+    frame = struct.pack("<h", 20000) * 2400  # 100 ms → one fake encoder slice
     released = asyncio.Event()
 
     async def pcm_stream(_text: str):
+        # Two slices (~9.6 KB tagged) fill TTS_PCM_FIRST_MP3_BYTES (8 KB).
         yield frame, 24000
         yield frame, 24000
-        # Block until the consumer has seen at least one MP3 fragment.
+        # Block until the consumer has seen the buffered first MP3 chunk.
         await released.wait()
         yield frame, 24000
 
@@ -295,6 +294,7 @@ async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
     agen = response.data_gen.__aiter__()
     first = await asyncio.wait_for(agen.__anext__(), timeout=1)
     chunks.append(first)
+    assert len(first) >= tts.TTS_PCM_FIRST_MP3_BYTES
     released.set()
     async for chunk in agen:
         chunks.append(chunk)
@@ -352,7 +352,7 @@ async def test_stream_pcm_skips_leading_silence():
     )
     chunks = await _collect(response.data_gen)
     assert len(chunks) >= 1
-    # 300 ms speech + ~100 ms keep_edge → four 100 ms encoder slices, not the
-    # 200 ms of leading silence that was discarded before the encoder started.
+    # 300 ms speech + ~100 ms keep_edge → four 100 ms encoder slices fed;
+    # leading silence was discarded. First MP3 yield is buffered (≥8 KB).
     assert fake._chunks_emitted == 4
-    assert len(chunks) == 4
+    assert sum(len(c) for c in chunks) >= tts.TTS_PCM_FIRST_MP3_BYTES

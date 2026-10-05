@@ -62,6 +62,8 @@ from .const import (
     STREAM_FIRST_CHUNK_CHARS,
     SUPPORTED_LANGUAGES,
     TTS_MAX_CONCURRENT_REQUESTS,
+    TTS_PCM_FIRST_MP3_BYTES,
+    TTS_PCM_MP3_BITRATE_K,
 )
 
 # HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
@@ -333,6 +335,10 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             if len(pending) >= max_leading:
                 pending.clear()
 
+        # int16 alignment — odd lengths corrupt the encoder mid-stream.
+        if len(pending) & 1:
+            pending = pending[:-1]
+
         process = await self._spawn_pcm_mp3_encoder(sample_rate)
         assert process.stdin is not None
         assert process.stdout is not None
@@ -345,7 +351,6 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 async for pcm, _sr in pcm_agen:
                     if not pcm:
                         continue
-                    # Keep int16 frame alignment if a chunk is odd-sized.
                     if len(pcm) & 1:
                         pcm = pcm[:-1]
                     if pcm:
@@ -357,12 +362,25 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                     await process.stdin.wait_closed()
 
         writer = asyncio.create_task(_write_pcm())
+        first_buf = bytearray()
+        yielded = False
         try:
             while True:
                 chunk = await process.stdout.read(4096)
                 if not chunk:
                     break
-                yield chunk
+                if not yielded:
+                    first_buf.extend(chunk)
+                    if len(first_buf) < TTS_PCM_FIRST_MP3_BYTES:
+                        continue
+                    yield bytes(first_buf)
+                    first_buf.clear()
+                    yielded = True
+                else:
+                    yield chunk
+            if first_buf:
+                yield bytes(first_buf)
+                yielded = True
             await writer
             stderr = (
                 await process.stderr.read() if process.stderr is not None else b""
@@ -373,6 +391,8 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 raise HomeAssistantError(
                     f"ffmpeg PCM→MP3 stream failed: {detail or code}"
                 )
+            if not yielded:
+                raise HomeAssistantError("ffmpeg PCM→MP3 stream returned no audio")
         except Exception:
             if not writer.done():
                 writer.cancel()
@@ -403,13 +423,14 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         ]
         if self.speech_speed != 1.0:
             command.extend(["-filter:a", f"atempo={self.speech_speed}"])
-        # flush_packets: emit MP3 frames as PCM arrives (lower time-to-first-audio)
+        # CBR: Assist satellites / some HA transcoder paths fail intermittently
+        # on VBR (-q:a). flush_packets keeps time-to-first-audio low.
         command.extend(
             [
                 "-f",
                 "mp3",
-                "-q:a",
-                "2",
+                "-b:a",
+                f"{TTS_PCM_MP3_BITRATE_K}k",
                 "-flush_packets",
                 "1",
                 "pipe:1",

@@ -55,6 +55,11 @@ MAX_SPEECH_SPEED = 1.5
 STREAM_FIRST_CHUNK_CHARS = 15
 DEFAULT_STREAM_PCM = True
 DEFAULT_SAMPLE_RATE = 24000
+# Assist satellites (and HA's own transcoder) are unreliable with tiny/VBR
+# first MP3 fragments from a live encoder. Buffer until we have a solid
+# header+frames, and encode the stream as constant bitrate.
+TTS_PCM_MP3_BITRATE_K = 128
+TTS_PCM_FIRST_MP3_BYTES = 8192
 
 SUPPORTED_LANGUAGES = ["en", "en-US"]
 DEFAULT_LANGUAGE = "en-US"
