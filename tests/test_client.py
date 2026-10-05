@@ -2,69 +2,45 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-COMPONENT = (
-    Path(__file__).resolve().parents[1] / "custom_components" / "ha_liquidai_custom"
-)
+from conftest import load_component_module
+
+client = load_component_module("client")
 
 
-def _load_component_module(name: str):
-    """Load a ha_liquidai_custom submodule without importing Home Assistant."""
-    module_name = f"ha_liquidai_custom.{name}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    if "ha_liquidai_custom" not in sys.modules:
-        package = types.ModuleType("ha_liquidai_custom")
-        package.__path__ = [str(COMPONENT)]  # type: ignore[attr-defined]
-        sys.modules["ha_liquidai_custom"] = package
-
-    if name == "client" and "homeassistant.exceptions" not in sys.modules:
-        ha_pkg = types.ModuleType("homeassistant")
-        ha_exc = types.ModuleType("homeassistant.exceptions")
-
-        class HomeAssistantError(Exception):
-            """Stub for tests."""
-
-        ha_exc.HomeAssistantError = HomeAssistantError
-        sys.modules["homeassistant"] = ha_pkg
-        sys.modules["homeassistant.exceptions"] = ha_exc
-
-    path = COMPONENT / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+def _response(status: int, *, json: Any = None, text: str = "") -> AsyncMock:
+    response = AsyncMock()
+    response.status = status
+    response.json = AsyncMock(return_value=json)
+    response.text = AsyncMock(return_value=text)
+    return response
 
 
-_load_component_module("const")
-client = _load_component_module("client")
+def _context(response: AsyncMock) -> MagicMock:
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=response)
+    context.__aexit__ = AsyncMock(return_value=None)
+    return context
+
+
+def _session(method: str, *responses: AsyncMock) -> MagicMock:
+    session = MagicMock()
+    setattr(
+        session, method, MagicMock(side_effect=[_context(r) for r in responses])
+    )
+    return session
 
 
 @pytest.mark.asyncio
 async def test_transcribe_returns_trimmed_text() -> None:
     """ASR JSON text is trimmed before return."""
-    response = AsyncMock()
-    response.status = 200
-    response.json = AsyncMock(return_value={"text": "  hello world  "})
+    session = _session("post", _response(200, json={"text": "  hello world  "}))
 
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=response)
-    context.__aexit__ = AsyncMock(return_value=None)
-
-    session = MagicMock()
-    session.post = MagicMock(return_value=context)
-
-    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
     result = await liquid_client.transcribe(b"RIFF", mime_type="audio/wav")
 
     assert result == "hello world"
@@ -76,7 +52,7 @@ async def test_transcribe_returns_trimmed_text() -> None:
 async def test_transcribe_empty_audio_returns_empty_string() -> None:
     """Empty audio skips the HTTP request."""
     session = MagicMock()
-    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
 
     result = await liquid_client.transcribe(b"")
 
@@ -85,70 +61,59 @@ async def test_transcribe_empty_audio_returns_empty_string() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transcribe_raises_on_http_error() -> None:
-    """Non-200 ASR responses raise HomeAssistantError."""
-    response = AsyncMock()
-    response.status = 500
-    response.text = AsyncMock(return_value="server error")
+async def test_transcribe_raises_typed_http_error() -> None:
+    """Non-200 ASR responses raise LiquidAiHttpError carrying the status."""
+    session = _session("post", _response(500, text="server error"))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
 
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=response)
-    context.__aexit__ = AsyncMock(return_value=None)
-
-    session = MagicMock()
-    session.post = MagicMock(return_value=context)
-
-    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
-
-    with pytest.raises(client.HomeAssistantError, match="LiquidAI ASR failed"):
+    with pytest.raises(client.LiquidAiHttpError, match="LiquidAI ASR failed") as info:
         await liquid_client.transcribe(b"RIFF")
+
+    assert info.value.status == 500
+    assert info.value.operation == "ASR"
+    assert isinstance(info.value, client.HomeAssistantError)
+
+
+@pytest.mark.asyncio
+async def test_synthesize_raises_typed_http_error() -> None:
+    session = _session("post", _response(503, text="busy"))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
+
+    with pytest.raises(client.LiquidAiHttpError) as info:
+        await liquid_client.synthesize("hello")
+
+    assert info.value.status == 503
 
 
 @pytest.mark.asyncio
 async def test_embed_speaker_parses_embedding_vector() -> None:
     """Speaker embed JSON returns a validated embedding payload."""
-    response = AsyncMock()
-    response.status = 200
-    response.json = AsyncMock(
-        return_value={
-            "embedding": [0.01] * 192,
-            "model": "sherpa-onnx-3dspeaker",
-            "quality": "ok",
-            "duration_ms": 1500,
-        }
+    session = _session(
+        "post",
+        _response(
+            200,
+            json={
+                "embedding": [0.01] * 192,
+                "model": "sherpa-onnx-3dspeaker",
+                "quality": "ok",
+                "duration_ms": 1500,
+            },
+        ),
     )
 
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=response)
-    context.__aexit__ = AsyncMock(return_value=None)
-
-    session = MagicMock()
-    session.post = MagicMock(return_value=context)
-
-    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
     result = await liquid_client.embed_speaker(b"RIFF", mime_type="audio/wav")
 
     assert len(result["embedding"]) == 192
     assert result["model"] == "sherpa-onnx-3dspeaker"
-    session.post.assert_called_once()
     assert session.post.call_args.args[0] == "http://example:8811/v1/speaker/embed"
 
 
 @pytest.mark.asyncio
 async def test_embed_speaker_raises_on_empty_embedding() -> None:
     """Empty embedding vectors raise HomeAssistantError."""
-    response = AsyncMock()
-    response.status = 200
-    response.json = AsyncMock(return_value={"embedding": []})
-
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=response)
-    context.__aexit__ = AsyncMock(return_value=None)
-
-    session = MagicMock()
-    session.post = MagicMock(return_value=context)
-
-    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    session = _session("post", _response(200, json={"embedding": []}))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
 
     with pytest.raises(client.HomeAssistantError, match="empty embedding"):
         await liquid_client.embed_speaker(b"RIFF")
@@ -157,26 +122,76 @@ async def test_embed_speaker_raises_on_empty_embedding() -> None:
 @pytest.mark.asyncio
 async def test_embed_speaker_accepts_soft_quality_without_vector() -> None:
     """Soft quality responses degrade without raising."""
-    response = AsyncMock()
-    response.status = 200
-    response.json = AsyncMock(
-        return_value={
-            "embedding": [],
-            "model": "sherpa-onnx-3dspeaker",
-            "quality": "too_short",
-            "duration_ms": 400,
-        }
+    session = _session(
+        "post",
+        _response(
+            200,
+            json={
+                "embedding": [],
+                "model": "sherpa-onnx-3dspeaker",
+                "quality": "too_short",
+                "duration_ms": 400,
+            },
+        ),
     )
-
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=response)
-    context.__aexit__ = AsyncMock(return_value=None)
-
-    session = MagicMock()
-    session.post = MagicMock(return_value=context)
-
-    liquid_client = client.LiquidAiTtsClient(session, "http://example:8811")
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
     result = await liquid_client.embed_speaker(b"RIFF")
 
     assert result["quality"] == "too_short"
     assert result["embedding"] == []
+
+
+@pytest.mark.asyncio
+async def test_embed_speaker_404_is_typed() -> None:
+    session = _session("post", _response(404, text="not found"))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
+
+    with pytest.raises(client.LiquidAiHttpError) as info:
+        await liquid_client.embed_speaker(b"RIFF")
+
+    assert info.value.status == 404
+
+
+@pytest.mark.asyncio
+async def test_check_connection_uses_healthz_ready() -> None:
+    """A ready server answers 200 on /healthz?ready=1 and returns its payload."""
+    session = _session("get", _response(200, json={"audio_ready": True}))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811/")
+
+    payload = await liquid_client.check_connection()
+
+    assert payload == {"audio_ready": True}
+    session.get.assert_called_once()
+    assert session.get.call_args.args[0] == "http://example:8811/healthz"
+    assert session.get.call_args.kwargs["params"] == {"ready": "1"}
+
+
+@pytest.mark.asyncio
+async def test_check_connection_reports_not_ready_on_503() -> None:
+    session = _session("get", _response(503, text="loading"))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
+
+    with pytest.raises(client.LiquidAiNotReadyError):
+        await liquid_client.check_connection()
+
+
+@pytest.mark.asyncio
+async def test_check_connection_falls_back_when_healthz_missing() -> None:
+    """Servers without /healthz still pass when the base URL answers < 500."""
+    session = _session("get", _response(404), _response(200))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
+
+    assert await liquid_client.check_connection() == {}
+    assert session.get.call_count == 2
+    assert session.get.call_args_list[1].args[0] == "http://example:8811"
+
+
+@pytest.mark.asyncio
+async def test_check_connection_fallback_rejects_server_error() -> None:
+    session = _session("get", _response(404), _response(502, text="bad gateway"))
+    liquid_client = client.LiquidAiClient(session, "http://example:8811")
+
+    with pytest.raises(client.LiquidAiHttpError) as info:
+        await liquid_client.check_connection()
+
+    assert info.value.status == 502

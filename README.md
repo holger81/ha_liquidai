@@ -32,9 +32,19 @@ When enabled (default), STT calls `/v1/speaker/embed` in parallel with ASR and s
 
 If fingerprinting is unavailable — endpoint missing, model not deployed, timeout, or disabled in config — **transcription and the rest of Assist still work**. Embed failures are logged and ignored; ha_agent falls back to guest identity.
 
-Configure under **LiquidAI → Voice settings**: `speaker_embed_enabled`, `speaker_embed_timeout`.
+Configure under **Settings → Devices & services → LiquidAI → Configure**: `speaker_embed_enabled` and `speaker_embed_grace` (how long STT waits for the embedding after the transcript is ready, default 3 s). Changes apply without re-adding the integration.
 
 Details: [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md)
+
+## Configuration
+
+| Where | Settings |
+|-------|----------|
+| **Reconfigure** (⋮ menu on the entry) | Server URL, TTS/ASR system prompts, request timeout |
+| **Configure** (options) | Speaker embedding on/off and grace window, chunking, silence trimming, inter-sentence gap, speech speed |
+| **Download diagnostics** | Redacted entry data, options, embed endpoint state, cached voice turns |
+
+Connection checks use `GET /healthz?ready=1`; a server that is still loading its model is reported as *not ready* rather than *cannot connect*.
 
 ## Requirements
 

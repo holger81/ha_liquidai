@@ -4,3 +4,4 @@ __pycache__/
 .ruff_cache/
 .venv/
 smoke_test.wav
+.DS_Store

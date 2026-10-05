@@ -2,46 +2,12 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import time
-import types
-from pathlib import Path
 from unittest.mock import MagicMock
 
-COMPONENT = (
-    Path(__file__).resolve().parents[1] / "custom_components" / "ha_liquidai_custom"
-)
+from conftest import load_component_module
 
-
-def _load_module(name: str):
-    module_name = f"ha_liquidai_custom.{name}"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-
-    if "ha_liquidai_custom" not in sys.modules:
-        package = types.ModuleType("ha_liquidai_custom")
-        package.__path__ = [str(COMPONENT)]  # type: ignore[attr-defined]
-        sys.modules["ha_liquidai_custom"] = package
-
-    if name == "voice_cache" and "homeassistant.core" not in sys.modules:
-        ha_pkg = types.ModuleType("homeassistant")
-        ha_core = types.ModuleType("homeassistant.core")
-        ha_core.HomeAssistant = object
-        sys.modules["homeassistant"] = ha_pkg
-        sys.modules["homeassistant.core"] = ha_core
-
-    path = COMPONENT / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_load_module("const")
-voice_cache = _load_module("voice_cache")
+voice_cache = load_component_module("voice_cache")
 
 
 def _fake_hass() -> MagicMock:

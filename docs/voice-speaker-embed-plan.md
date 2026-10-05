@@ -41,7 +41,7 @@ Assist pipeline (one utterance)
   │    ├─ collect audio → WAV (existing)
   │    ├─ parallel HTTP:
   │    │    POST /v1/asr            → text
-  │    │    POST /v1/speaker/embed  → embedding[192]
+  │    │    POST /v1/speaker/embed  → embedding[N] (N = model dim; 192 for CAM++ VoxCeleb)
   │    └─ write voice_turn_cache entry (TTL ~5s)
   │
   ├─ ha_agent conversation
@@ -75,7 +75,7 @@ audio=<wav bytes>
 
 ```json
 {
-  "embedding": [0.012, -0.034, "... 192 floats total"],
+  "embedding": [0.012, -0.034, "... N floats; dimension depends on the server model (192 for the default CAM++ VoxCeleb checkpoint)"],
   "model": "sherpa-onnx-3dspeaker",
   "duration_ms": 1840,
   "quality": "ok"
@@ -144,7 +144,7 @@ async def embed_speaker(
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `speaker_embed_enabled` | `true` | Skip embed call when false |
-| `speaker_embed_timeout` | same as ASR timeout | Separate timeout if needed |
+| `speaker_embed_grace` | `3.0` s | How long STT waits for the embedding once ASR is done (options flow) |
 
 ---
 
@@ -244,7 +244,7 @@ See [agent-voice-inference-plan.md](https://github.com/holger81/ha_agent/blob/ma
 
 | Test | File |
 |------|------|
-| `embed_speaker` parses 192-d vector | `tests/test_client.py` |
+| `embed_speaker` parses the embedding vector (any dimension) | `tests/test_client.py` |
 | Parallel ASR+embed; embed failure still returns text | `tests/test_stt.py` |
 | Cache store/pop TTL and text match | `tests/test_voice_cache.py` |
 | `speaker_embed_enabled=false` skips embed | `tests/test_stt.py` |
@@ -258,9 +258,9 @@ Mock HTTP; no live inference box in CI.
 ### Inference box (`.31`) — Part A
 
 - [x] Implement `POST /v1/speaker/embed` (liquidai-audio-docker, commit `f22c871`)
-- [ ] Download Sherpa speaker ONNX model to `models/speaker/` on inference host
+- [x] Sherpa speaker ONNX model auto-downloads on first start (`SPEAKER_MODEL_FILENAME`, default English CAM++ VoxCeleb, 192-d)
 - [ ] Rebuild/restart container on `.31`
-- [ ] Smoke: `curl -F audio=@sample.wav http://192.168.10.31:8811/v1/speaker/embed`
+- [x] Smoke: `curl -F audio=@sample.wav http://192.168.10.31:8811/v1/speaker/embed`
 - [ ] Confirm p95 latency < 100 ms on representative WAV
 
 ### ha_liquidai

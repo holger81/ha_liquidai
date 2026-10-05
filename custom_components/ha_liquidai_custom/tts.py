@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -31,7 +32,7 @@ from .audio import (
     split_for_tts,
     trim_pcm_silence,
 )
-from .client import LiquidAiTtsClient
+from .client import LiquidAiClient
 from .const import (
     CHUNK_GAP_MS,
     CONF_BASE_URL,
@@ -53,6 +54,7 @@ from .const import (
     SILENCE_THRESHOLD,
     STREAM_FIRST_CHUNK_CHARS,
     SUPPORTED_LANGUAGES,
+    TTS_MAX_CONCURRENT_REQUESTS,
 )
 
 # HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
@@ -75,12 +77,15 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the TTS entity."""
         self._entry = entry
-        self._client = LiquidAiTtsClient(
+        self._client = LiquidAiClient(
             async_get_clientsession(hass),
             entry.data[CONF_BASE_URL],
             system_prompt=entry.data.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT),
             timeout=entry.data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
         )
+        self._synth_semaphore = asyncio.Semaphore(TTS_MAX_CONCURRENT_REQUESTS)
+        # Encoded inter-sentence silence, keyed by (sample_rate, gap_ms, speed).
+        self._gap_mp3_cache: dict[tuple[int, int, float], bytes] = {}
         self._attr_name = "LiquidAI TTS"
         self._attr_unique_id = entry.entry_id
         self._attr_supported_languages = SUPPORTED_LANGUAGES
@@ -138,27 +143,35 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
 
         if len(chunks) == 1:
             wav = await self._client.synthesize(chunks[0])
-            sample_rate = read_sample_rate(wav)
-            trimmed = trim_pcm_silence(
-                extract_pcm(wav),
-                sample_rate,
-                threshold=self.silence_threshold,
-                keep_edge_ms=self.keep_edge_ms,
-            )
-            return ONESHOT_EXTENSION, await self._maybe_adjust_wav_speed(
-                rebuild_wav(wav, trimmed)
-            )
+            trimmed = await self._run_blocking(self._trimmed_wav, wav)
+            return ONESHOT_EXTENSION, await self._maybe_adjust_wav_speed(trimmed)
 
+        # Bounded concurrency: the server runs a single model, so flooding it
+        # with every chunk at once only queues requests and risks timeouts.
         wav_buffers = await asyncio.gather(
-            *(self._client.synthesize(chunk) for chunk in chunks)
+            *(self._synthesize_limited(chunk) for chunk in chunks)
         )
-        merged = concat_wav_buffers(
+        merged = await self._run_blocking(
+            concat_wav_buffers,
             list(wav_buffers),
             chunk_gap_ms=self.chunk_gap_ms,
             keep_edge_ms=self.keep_edge_ms,
             threshold=self.silence_threshold,
         )
         return ONESHOT_EXTENSION, await self._maybe_adjust_wav_speed(merged)
+
+    async def _synthesize_limited(self, text: str) -> bytes:
+        """Synthesize while holding the concurrency semaphore."""
+        async with self._synth_semaphore:
+            return await self._client.synthesize(text)
+
+    async def _run_blocking(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run CPU-bound PCM work off the event loop."""
+        if kwargs:
+            return await self.hass.async_add_executor_job(
+                functools.partial(func, *args, **kwargs)
+            )
+        return await self.hass.async_add_executor_job(func, *args)
 
     async def async_stream_tts_audio(
         self, request: TTSAudioRequest
@@ -200,9 +213,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 template_wav = wav
                 sample_rate = read_sample_rate(wav)
 
-            mp3_task = asyncio.create_task(
-                self._convert_wav_to_mp3(self._trimmed_wav(wav), streaming=True)
-            )
+            mp3_task = asyncio.create_task(self._trim_and_encode(wav))
             next_sentence = await next_sentence_task
             pending_synth = (
                 asyncio.create_task(self._client.synthesize(next_sentence))
@@ -220,13 +231,28 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 and sample_rate is not None
                 and template_wav is not None
             ):
-                gap_wav = rebuild_wav(
-                    template_wav,
-                    make_silence_pcm(sample_rate, self.chunk_gap_ms),
-                )
-                gap_mp3 = await self._convert_wav_to_mp3(gap_wav, streaming=True)
+                gap_mp3 = await self._gap_mp3(template_wav, sample_rate)
                 if gap_mp3:
                     yield gap_mp3
+
+    async def _trim_and_encode(self, wav: bytes) -> bytes:
+        """Trim silence (off-loop) and encode the sentence to MP3."""
+        trimmed = await self._run_blocking(self._trimmed_wav, wav)
+        return await self._convert_wav_to_mp3(trimmed, streaming=True)
+
+    async def _gap_mp3(self, template_wav: bytes, sample_rate: int) -> bytes:
+        """Return the encoded inter-sentence gap, encoding it only once."""
+        key = (sample_rate, self.chunk_gap_ms, self.speech_speed)
+        cached = self._gap_mp3_cache.get(key)
+        if cached is not None:
+            return cached
+        gap_wav = rebuild_wav(
+            template_wav,
+            make_silence_pcm(sample_rate, self.chunk_gap_ms),
+        )
+        gap_mp3 = await self._convert_wav_to_mp3(gap_wav, streaming=True)
+        self._gap_mp3_cache[key] = gap_mp3
+        return gap_mp3
 
     def _trimmed_wav(self, wav: bytes) -> bytes:
         """Return a trimmed WAV buffer."""
@@ -328,7 +354,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                         yield plain
 
         while True:
-            sentence, buffer = pop_complete_sentence(buffer)
+            sentence, buffer = pop_complete_sentence(buffer, at_end=True)
             if sentence is None:
                 break
             plain = sanitize_for_tts(sentence)

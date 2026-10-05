@@ -1,4 +1,4 @@
-"""HTTP client for LiquidAI /v1/asr and /v1/tts."""
+"""HTTP client for the LiquidAI audio server (/v1/asr, /v1/tts, /v1/speaker/embed)."""
 
 from __future__ import annotations
 
@@ -18,9 +18,27 @@ from .const import (
 if TYPE_CHECKING:
     from aiohttp import ClientSession
 
+HEALTHZ_PATH = "/healthz"
+CONNECTION_CHECK_TIMEOUT = 10
 
-class LiquidAiTtsClient:
-    """Async client for LiquidAI speech-to-text and text-to-speech."""
+
+class LiquidAiHttpError(HomeAssistantError):
+    """A LiquidAI request returned a non-success HTTP status."""
+
+    def __init__(self, operation: str, status: int, body: str = "") -> None:
+        """Initialize with the failing operation and HTTP status."""
+        self.operation = operation
+        self.status = status
+        self.body = body[:200]
+        super().__init__(f"LiquidAI {operation} failed (HTTP {status}): {self.body}")
+
+
+class LiquidAiNotReadyError(HomeAssistantError):
+    """The LiquidAI server is reachable but the audio model is not loaded yet."""
+
+
+class LiquidAiClient:
+    """Async client for LiquidAI speech-to-text, text-to-speech and speaker embed."""
 
     def __init__(
         self,
@@ -45,17 +63,41 @@ class LiquidAiTtsClient:
         """Return the configured base URL."""
         return self._base_url
 
-    async def check_connection(self) -> None:
-        """Verify the LiquidAI server is reachable."""
+    async def check_connection(self) -> dict[str, Any]:
+        """Verify the LiquidAI server is reachable and its model is ready.
+
+        Prefers ``GET /healthz?ready=1`` (returns 503 while the model loads).
+        Falls back to a plain GET on the base URL for servers without
+        ``/healthz`` so older deployments still pass the config flow.
+        """
+        timeout = aiohttp.ClientTimeout(total=CONNECTION_CHECK_TIMEOUT)
         try:
             async with self._session.get(
+                f"{self._base_url}{HEALTHZ_PATH}",
+                params={"ready": "1"},
+                timeout=timeout,
+            ) as response:
+                if response.status == 200:
+                    payload = await response.json(content_type=None)
+                    return payload if isinstance(payload, dict) else {}
+                if response.status == 503:
+                    raise LiquidAiNotReadyError(
+                        "LiquidAI server is still loading its audio model"
+                    )
+                if response.status != 404:
+                    raise LiquidAiHttpError(
+                        "health check", response.status, await response.text()
+                    )
+
+            async with self._session.get(
                 self._base_url,
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=timeout,
             ) as response:
                 if response.status >= 500:
-                    raise HomeAssistantError(
-                        f"LiquidAI server returned HTTP {response.status}"
+                    raise LiquidAiHttpError(
+                        "connection check", response.status, await response.text()
                     )
+                return {}
         except TimeoutError as err:
             raise HomeAssistantError("LiquidAI server timed out") from err
         except aiohttp.ClientError as err:
@@ -78,9 +120,8 @@ class LiquidAiTtsClient:
                 timeout=self._timeout,
             ) as response:
                 if response.status != 200:
-                    body = await response.text()
-                    raise HomeAssistantError(
-                        f"LiquidAI TTS failed (HTTP {response.status}): {body[:200]}"
+                    raise LiquidAiHttpError(
+                        "TTS", response.status, await response.text()
                     )
                 wav_bytes = await response.read()
         except TimeoutError as err:
@@ -109,15 +150,7 @@ class LiquidAiTtsClient:
         if not audio_bytes:
             return ""
 
-        filename = "audio.ogg" if "ogg" in mime_type else "audio.wav"
-        form = aiohttp.FormData()
-        form.add_field("type", mime_type)
-        form.add_field(
-            "audio",
-            audio_bytes,
-            filename=filename,
-            content_type=mime_type,
-        )
+        form = _audio_form(audio_bytes, mime_type)
         form.add_field("system_prompt", system_prompt)
 
         try:
@@ -127,9 +160,8 @@ class LiquidAiTtsClient:
                 timeout=self._timeout,
             ) as response:
                 if response.status != 200:
-                    body = await response.text()
-                    raise HomeAssistantError(
-                        f"LiquidAI ASR failed (HTTP {response.status}): {body[:200]}"
+                    raise LiquidAiHttpError(
+                        "ASR", response.status, await response.text()
                     )
                 payload = await response.json(content_type=None)
         except TimeoutError as err:
@@ -155,15 +187,7 @@ class LiquidAiTtsClient:
         if not audio_bytes:
             raise HomeAssistantError("No audio for speaker embedding")
 
-        filename = "audio.ogg" if "ogg" in mime_type else "audio.wav"
-        form = aiohttp.FormData()
-        form.add_field("type", mime_type)
-        form.add_field(
-            "audio",
-            audio_bytes,
-            filename=filename,
-            content_type=mime_type,
-        )
+        form = _audio_form(audio_bytes, mime_type)
 
         try:
             async with self._session.post(
@@ -172,10 +196,8 @@ class LiquidAiTtsClient:
                 timeout=self._speaker_embed_timeout,
             ) as response:
                 if response.status != 200:
-                    body = await response.text()
-                    raise HomeAssistantError(
-                        "LiquidAI speaker embed failed "
-                        f"(HTTP {response.status}): {body[:200]}"
+                    raise LiquidAiHttpError(
+                        "speaker embed", response.status, await response.text()
                     )
                 payload = await response.json(content_type=None)
         except TimeoutError as err:
@@ -217,3 +239,17 @@ class LiquidAiTtsClient:
             }
 
         raise HomeAssistantError("LiquidAI speaker embed returned empty embedding")
+
+
+def _audio_form(audio_bytes: bytes, mime_type: str) -> aiohttp.FormData:
+    """Build the multipart form shared by ASR and speaker embed."""
+    filename = "audio.ogg" if "ogg" in mime_type else "audio.wav"
+    form = aiohttp.FormData()
+    form.add_field("type", mime_type)
+    form.add_field(
+        "audio",
+        audio_bytes,
+        filename=filename,
+        content_type=mime_type,
+    )
+    return form

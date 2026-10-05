@@ -6,6 +6,9 @@ src = ["custom_components", "scripts", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["conftest", "ha_liquidai_custom"]
+
 [tool.ruff.lint.per-file-ignores]
 "scripts/smoke_test_tts.py" = ["E402"]
 "scripts/smoke_test_stt.py" = ["E402"]

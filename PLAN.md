@@ -79,7 +79,7 @@ voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker
 **Part A — inference box** (liquidai-audio-docker, shipped 2026-07):
 
 - [x] `POST /v1/speaker/embed` (Sherpa-ONNX on `:8811`) — code in `lfm2audio/speaker_embed.py`, `routes.py`
-- [ ] Deploy on `.31`: Sherpa ONNX in `models/speaker/`, rebuild container, smoke curl
+- [x] Deployed on `.31` (model auto-downloads; `/healthz` reports `speaker_embed_ready`)
 
 **Parts B–D — this repo** (`~/Projects/ha_liquidai`):
 
@@ -88,6 +88,7 @@ voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker
 - [x] `custom_components/ha_liquidai_custom/voice_cache.py` — short-lived `hass.data` bridge to ha_agent
 - [x] Config flag `speaker_embed_enabled` in `const.py` / `config_flow.py`
 - [x] Tests: `tests/test_client.py`, `tests/test_stt.py`, `tests/test_voice_cache.py`
+- [x] Speaker embed toggle + grace window moved to the options flow; reconfigure flow for URL/prompts; diagnostics
 
 ## Assist pipeline wiring
 
@@ -99,6 +100,15 @@ voice identity. Full plan: [docs/voice-speaker-embed-plan.md](docs/voice-speaker
 
 See [docs/assist-setup.md](docs/assist-setup.md).
 
+## Hardening (2026-10 audit)
+
+- [x] Sentence splitter keeps decimals/versions/abbreviations intact (`21.5 degrees`, `Dr. Smith`)
+- [x] Silence trimming vectorised and run in the executor; one-shot TTS bounded to 2 parallel requests
+- [x] Inter-sentence gap MP3 encoded once per entity instead of one ffmpeg per sentence
+- [x] Typed `LiquidAiHttpError`; `/healthz?ready=1` connection check with *not ready* error
+- [x] Shared `tests/conftest.py`; TTS and config-flow tests
+- [ ] Combined `POST /v1/assist/transcribe` endpoint (removes text-match cache heuristic)
+
 ## Next action
 
-Deploy Sherpa model on `.31` and smoke-test `POST /v1/speaker/embed`. Then implement ha_agent Phase 9b clustering — see [ha_agent PLAN.md](https://github.com/holger81/ha_agent/blob/main/PLAN.md).
+Implement ha_agent Phase 9b clustering (consume `pop_matching_voice_turn`) — see [ha_agent PLAN.md](https://github.com/holger81/ha_agent/blob/main/PLAN.md).

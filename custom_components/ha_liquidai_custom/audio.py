@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import struct
+import sys
+from array import array
 
 from .const import (
     CHUNK_GAP_MS,
@@ -13,8 +15,57 @@ from .const import (
     SILENCE_THRESHOLD,
 )
 
-_SENTENCE_RE = re.compile(r"[^.!?]+[.!?]+|[^.!?]+$")
-_COMPLETE_SENTENCE_RE = re.compile(r"^\s*([^.!?]+[.!?]+)")
+# A sentence ends at terminal punctuation followed by whitespace (or end of
+# text). The lookahead keeps decimals ("21.5"), versions ("2026.10.1"), and
+# times ("10.30") intact. Abbreviations are handled in _find_sentence_end.
+_SENTENCE_END_RE = re.compile(r"[.!?]+(?=\s|$)")
+_SENTENCE_END_STREAMING_RE = re.compile(r"[.!?]+(?=\s)")
+_ABBREVIATIONS = frozenset(
+    {"dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "vs", "e.g", "i.e"}
+)
+# Block size for the vectorised silence scan; ~43 ms at 24 kHz.
+_SCAN_BLOCK_SAMPLES = 1024
+
+
+def _ends_with_abbreviation(text: str) -> bool:
+    """Return True when text ends with a known abbreviation (without the dot)."""
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+    last_word = stripped.rsplit(maxsplit=1)[-1]
+    return last_word.lower() in _ABBREVIATIONS
+
+
+def _find_sentence_end(buffer: str, *, at_end: bool) -> int | None:
+    """Return the index just past the first sentence terminator, or None.
+
+    When ``at_end`` is False (streaming) a terminator must be followed by
+    whitespace so a partial "It is 21." is not split before the "5" arrives.
+    """
+    pattern = _SENTENCE_END_RE if at_end else _SENTENCE_END_STREAMING_RE
+    for match in pattern.finditer(buffer):
+        if _ends_with_abbreviation(buffer[: match.start()]):
+            continue
+        return match.end()
+    return None
+
+
+def iter_sentences(text: str) -> list[str]:
+    """Split complete text into sentences (decimal and abbreviation aware)."""
+    sentences: list[str] = []
+    remainder = text
+    while remainder:
+        end = _find_sentence_end(remainder, at_end=True)
+        if end is None:
+            tail = remainder.strip()
+            if tail:
+                sentences.append(tail)
+            break
+        sentence = remainder[:end].strip()
+        if sentence:
+            sentences.append(sentence)
+        remainder = remainder[end:]
+    return sentences
 
 
 def sanitize_for_tts(text: str) -> str:
@@ -43,14 +94,9 @@ def split_for_tts(text: str, max_len: int = MAX_CHUNK_LEN) -> list[str]:
     if not text:
         return []
 
-    sentences = [
-        sentence.strip()
-        for sentence in _SENTENCE_RE.findall(text)
-        if sentence.strip()
-    ]
     chunks: list[str] = []
 
-    for sentence in sentences:
+    for sentence in iter_sentences(text):
         if len(sentence) <= max_len:
             chunks.append(sentence)
             continue
@@ -66,31 +112,42 @@ def split_for_tts(text: str, max_len: int = MAX_CHUNK_LEN) -> list[str]:
     return chunks
 
 
-def pop_complete_sentence(buffer: str) -> tuple[str | None, str]:
-    """Pop the first complete sentence from the front of a buffer."""
-    match = _COMPLETE_SENTENCE_RE.match(buffer)
-    if not match:
+def pop_complete_sentence(
+    buffer: str, *, at_end: bool = False
+) -> tuple[str | None, str]:
+    """Pop the first complete sentence from the front of a buffer.
+
+    Pass ``at_end=True`` once the text stream is finished so a trailing
+    terminator without following whitespace also counts as a sentence end.
+    """
+    end = _find_sentence_end(buffer, at_end=at_end)
+    if end is None:
         return None, buffer
-    sentence = match.group(1).strip()
-    return sentence, buffer[match.end() :]
+    sentence = buffer[:end].strip()
+    if not sentence:
+        return None, buffer[end:]
+    return sentence, buffer[end:]
 
 
 def pop_early_chunk(buffer: str, min_chars: int) -> tuple[str | None, str]:
     """Pop a speakable prefix once the buffer reaches min_chars."""
-    plain = buffer.strip()
-    if len(plain) < min_chars:
+    plain = buffer.lstrip()
+    text = plain.rstrip()
+    if len(text) < min_chars:
         return None, buffer
 
     break_at = min_chars
-    if len(plain) > min_chars:
-        space = plain.rfind(" ", 0, min(min_chars + 30, len(plain)))
+    if len(text) > min_chars:
+        space = text.rfind(" ", 0, min(min_chars + 30, len(text)))
         if space >= min_chars // 2:
             break_at = space
 
-    chunk = plain[:break_at].strip()
-    remainder = plain[break_at:].lstrip()
+    chunk = text[:break_at].strip()
     if not chunk:
         return None, buffer
+    # Slice the un-rstripped text so trailing whitespace survives; otherwise
+    # the next streamed delta glues onto the last word ("kitchen" + "lights").
+    remainder = plain[break_at:].lstrip()
     return chunk, remainder
 
 
@@ -179,28 +236,60 @@ def trim_pcm_silence(
     if num_samples == 0:
         return pcm
 
-    def sample_at(index: int) -> int:
-        offset = index * 2
-        value = pcm[offset] | (pcm[offset + 1] << 8)
-        return value - 65536 if value > 32767 else value
+    samples = _pcm16_to_samples(pcm[: num_samples * 2])
+    first = _first_loud_index(samples, threshold)
+    if first is None:
+        return pcm
+    last = _last_loud_index(samples, threshold)
+    if last is None:
+        return pcm
 
-    start = 0
-    end = num_samples - 1
-
-    for index in range(num_samples):
-        if abs(sample_at(index)) > threshold:
-            start = max(0, index - keep_edge_samples)
-            break
-
-    for index in range(num_samples - 1, -1, -1):
-        if abs(sample_at(index)) > threshold:
-            end = min(num_samples - 1, index + keep_edge_samples)
-            break
-
+    start = max(0, first - keep_edge_samples)
+    end = min(num_samples - 1, last + keep_edge_samples)
     if start >= end:
         return pcm
 
     return pcm[start * 2 : (end + 1) * 2]
+
+
+def _pcm16_to_samples(pcm: bytes) -> array:
+    """Decode little-endian 16-bit PCM into a signed-short array."""
+    samples = array("h")
+    samples.frombytes(pcm)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    return samples
+
+
+def _first_loud_index(samples: array, threshold: int) -> int | None:
+    """Return the first sample index above threshold using block scanning.
+
+    ``max(map(abs, block))`` runs in C, so this is roughly two orders of
+    magnitude faster than a per-sample Python loop on multi-second clips.
+    """
+    total = len(samples)
+    for block_start in range(0, total, _SCAN_BLOCK_SAMPLES):
+        block = samples[block_start : block_start + _SCAN_BLOCK_SAMPLES]
+        if max(map(abs, block)) <= threshold:
+            continue
+        for offset, value in enumerate(block):
+            if abs(value) > threshold:
+                return block_start + offset
+    return None
+
+
+def _last_loud_index(samples: array, threshold: int) -> int | None:
+    """Return the last sample index above threshold using block scanning."""
+    total = len(samples)
+    block_start = ((total - 1) // _SCAN_BLOCK_SAMPLES) * _SCAN_BLOCK_SAMPLES
+    while block_start >= 0:
+        block = samples[block_start : block_start + _SCAN_BLOCK_SAMPLES]
+        if max(map(abs, block)) > threshold:
+            for offset in range(len(block) - 1, -1, -1):
+                if abs(block[offset]) > threshold:
+                    return block_start + offset
+        block_start -= _SCAN_BLOCK_SAMPLES
+    return None
 
 
 def make_silence_pcm(sample_rate: int, ms: int) -> bytes:

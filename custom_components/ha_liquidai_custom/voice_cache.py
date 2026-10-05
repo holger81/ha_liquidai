@@ -185,13 +185,13 @@ def pop_matching_voice_turn(
         )
         if not _payload_matches_satellite(payload, satellite_id):
             continue
-        if payload.created_at > best_created_at or (
+        is_newer = payload.created_at > best_created_at or (
             payload.created_at == best_created_at and exact_satellite
-        ):
-            if exact_satellite or not best_is_exact_satellite:
-                best_created_at = payload.created_at
-                best_index = index
-                best_is_exact_satellite = exact_satellite
+        )
+        if is_newer and (exact_satellite or not best_is_exact_satellite):
+            best_created_at = payload.created_at
+            best_index = index
+            best_is_exact_satellite = exact_satellite
 
     if best_index is None:
         return None

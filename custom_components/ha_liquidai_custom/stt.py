@@ -26,23 +26,24 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .audio import is_wav, pcm_to_wav
-from .client import LiquidAiTtsClient
+from .client import LiquidAiClient, LiquidAiHttpError
 from .const import (
     CONF_ASR_SYSTEM_PROMPT,
     CONF_BASE_URL,
     CONF_SPEAKER_EMBED_ENABLED,
-    CONF_SPEAKER_EMBED_TIMEOUT,
+    CONF_SPEAKER_EMBED_GRACE,
     CONF_TIMEOUT,
     DATA_EMBED_UNAVAILABLE,
     DEFAULT_ASR_SYSTEM_PROMPT,
     DEFAULT_LANGUAGE,
     DEFAULT_SPEAKER_EMBED_ENABLED,
-    DEFAULT_SPEAKER_EMBED_TIMEOUT,
     DEFAULT_TIMEOUT,
+    EMBED_ENDPOINT_MISSING_STATUSES,
     LOGGER,
     SPEAKER_EMBED_GRACE_SECONDS,
     SUPPORTED_LANGUAGES,
 )
+from .settings import entry_setting
 from .voice_cache import build_voice_turn_payload, store_voice_turn
 
 
@@ -70,8 +71,10 @@ def _mark_embed_unavailable(
 
 
 def _is_embed_endpoint_missing(err: BaseException) -> bool:
-    message = str(err)
-    return any(token in message for token in ("HTTP 404", "HTTP 405", "HTTP 501"))
+    return (
+        isinstance(err, LiquidAiHttpError)
+        and err.status in EMBED_ENDPOINT_MISSING_STATUSES
+    )
 
 
 async def async_setup_entry(
@@ -91,14 +94,13 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         self.hass = hass
         self._entry = entry
         request_timeout = entry.data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-        embed_timeout = entry.data.get(
-            CONF_SPEAKER_EMBED_TIMEOUT, DEFAULT_SPEAKER_EMBED_TIMEOUT
-        )
-        self._client = LiquidAiTtsClient(
+        # The embed request may run slightly longer than ASR plus the grace
+        # window; a separate user-facing timeout is not needed.
+        self._client = LiquidAiClient(
             async_get_clientsession(hass),
             entry.data[CONF_BASE_URL],
             timeout=request_timeout,
-            speaker_embed_timeout=embed_timeout,
+            speaker_embed_timeout=request_timeout,
         )
         self._attr_name = "LiquidAI STT"
         self._attr_unique_id = f"{entry.entry_id}_stt"
@@ -117,9 +119,23 @@ class LiquidAiSttEntity(SpeechToTextEntity):
     @property
     def speaker_embed_enabled(self) -> bool:
         """Return whether speaker embedding is enabled."""
-        return self._entry.data.get(
-            CONF_SPEAKER_EMBED_ENABLED,
-            DEFAULT_SPEAKER_EMBED_ENABLED,
+        return bool(
+            entry_setting(
+                self._entry,
+                CONF_SPEAKER_EMBED_ENABLED,
+                DEFAULT_SPEAKER_EMBED_ENABLED,
+            )
+        )
+
+    @property
+    def speaker_embed_grace(self) -> float:
+        """Return how long to wait for the embedding after ASR finished."""
+        return float(
+            entry_setting(
+                self._entry,
+                CONF_SPEAKER_EMBED_GRACE,
+                SPEAKER_EMBED_GRACE_SECONDS,
+            )
         )
 
     @property
@@ -151,9 +167,10 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         self, metadata: SpeechMetadata, stream: AsyncIterable[bytes]
     ) -> SpeechResult:
         """Transcribe an Assist audio stream via LiquidAI ASR."""
-        audio_bytes = b""
+        buffer = bytearray()
         async for chunk in stream:
-            audio_bytes += chunk
+            buffer.extend(chunk)
+        audio_bytes = bytes(buffer)
 
         if not audio_bytes:
             return SpeechResult("", SpeechResultState.SUCCESS)
@@ -177,6 +194,9 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         if self.speaker_embed_enabled and _is_embed_available(
             self.hass, self._entry.entry_id
         ):
+            # SpeechMetadata does not expose the originating satellite today;
+            # the lookup is forward-compatible should HA add it. Until then the
+            # cache falls back to text matching (see voice_cache).
             satellite_id = getattr(metadata, "satellite_id", None) or getattr(
                 metadata, "device_id", None
             )
@@ -242,12 +262,13 @@ class LiquidAiSttEntity(SpeechToTextEntity):
         embed_task: asyncio.Task[dict[str, Any]],
     ) -> dict[str, Any] | None:
         """Return embed result without delaying ASR beyond a short grace window."""
+        grace = self.speaker_embed_grace
         try:
             if embed_task.done():
                 return self._resolve_embed_task(embed_task)
             return await asyncio.wait_for(
                 asyncio.shield(embed_task),
-                timeout=SPEAKER_EMBED_GRACE_SECONDS,
+                timeout=grace,
             )
         except TimeoutError:
             embed_task.cancel()
@@ -256,7 +277,7 @@ class LiquidAiSttEntity(SpeechToTextEntity):
             LOGGER.debug(
                 "Speaker embed did not finish within %.1fs after ASR; "
                 "continuing without fingerprint",
-                SPEAKER_EMBED_GRACE_SECONDS,
+                grace,
             )
             return None
         except HomeAssistantError as err:

@@ -5,12 +5,17 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-from homeassistant import config_entries
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
-from .client import LiquidAiTtsClient
+from .client import LiquidAiClient, LiquidAiNotReadyError
 from .const import (
     CHUNK_GAP_MS,
     CONF_ASR_SYSTEM_PROMPT,
@@ -20,14 +25,13 @@ from .const import (
     CONF_MAX_CHUNK_LEN,
     CONF_SILENCE_THRESHOLD,
     CONF_SPEAKER_EMBED_ENABLED,
-    CONF_SPEAKER_EMBED_TIMEOUT,
+    CONF_SPEAKER_EMBED_GRACE,
     CONF_SPEECH_SPEED,
     CONF_STREAM_FIRST_CHUNK_CHARS,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DEFAULT_ASR_SYSTEM_PROMPT,
     DEFAULT_SPEAKER_EMBED_ENABLED,
-    DEFAULT_SPEAKER_EMBED_TIMEOUT,
     DEFAULT_SPEECH_SPEED,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
@@ -36,11 +40,44 @@ from .const import (
     KEEP_EDGE_MS,
     LOGGER,
     MAX_CHUNK_LEN,
+    MAX_SPEAKER_EMBED_GRACE,
     MAX_SPEECH_SPEED,
+    MIN_SPEAKER_EMBED_GRACE,
     MIN_SPEECH_SPEED,
     SILENCE_THRESHOLD,
+    SPEAKER_EMBED_GRACE_SECONDS,
     STREAM_FIRST_CHUNK_CHARS,
 )
+
+# Keys stored in entry.data (connection + model prompts).
+CONNECTION_KEYS = (
+    CONF_BASE_URL,
+    CONF_SYSTEM_PROMPT,
+    CONF_ASR_SYSTEM_PROMPT,
+    CONF_TIMEOUT,
+)
+
+
+def _number(
+    minimum: float, maximum: float, step: float
+) -> selector.NumberSelector:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=minimum,
+            max=maximum,
+            step=step,
+            mode=selector.NumberSelectorMode.BOX,
+        ),
+    )
+
+
+def _multiline_text() -> selector.TextSelector:
+    return selector.TextSelector(
+        selector.TextSelectorConfig(
+            type=selector.TextSelectorType.TEXT,
+            multiline=True,
+        ),
+    )
 
 
 def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
@@ -64,133 +101,72 @@ def _prompt_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Required(
                 CONF_SYSTEM_PROMPT,
                 default=defaults.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
-                    multiline=True,
-                ),
-            ),
+            ): _multiline_text(),
             vol.Required(
                 CONF_ASR_SYSTEM_PROMPT,
                 default=defaults.get(CONF_ASR_SYSTEM_PROMPT, DEFAULT_ASR_SYSTEM_PROMPT),
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(
-                    type=selector.TextSelectorType.TEXT,
-                    multiline=True,
-                ),
-            ),
+            ): _multiline_text(),
             vol.Optional(
                 CONF_TIMEOUT,
                 default=defaults.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=10,
-                    max=600,
-                    step=1,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(10, 600, 1),
+        }
+    )
+
+
+def _reconfigure_schema(defaults: dict[str, Any]) -> vol.Schema:
+    """Combine connection and prompt settings into one reconfigure form."""
+    return _user_schema(defaults).extend(_prompt_schema(defaults).schema)
+
+
+def _options_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    defaults = defaults or {}
+    return vol.Schema(
+        {
             vol.Optional(
                 CONF_SPEAKER_EMBED_ENABLED,
                 default=defaults.get(
                     CONF_SPEAKER_EMBED_ENABLED, DEFAULT_SPEAKER_EMBED_ENABLED
                 ),
-            ): bool,
+            ): selector.BooleanSelector(),
             vol.Optional(
-                CONF_SPEAKER_EMBED_TIMEOUT,
+                CONF_SPEAKER_EMBED_GRACE,
                 default=defaults.get(
-                    CONF_SPEAKER_EMBED_TIMEOUT, DEFAULT_SPEAKER_EMBED_TIMEOUT
+                    CONF_SPEAKER_EMBED_GRACE, SPEAKER_EMBED_GRACE_SECONDS
                 ),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=10,
-                    max=600,
-                    step=1,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
-        }
-    )
-
-
-def _advanced_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
-    defaults = defaults or {}
-    return vol.Schema(
-        {
+            ): _number(MIN_SPEAKER_EMBED_GRACE, MAX_SPEAKER_EMBED_GRACE, 0.5),
             vol.Optional(
                 CONF_MAX_CHUNK_LEN,
                 default=defaults.get(CONF_MAX_CHUNK_LEN, MAX_CHUNK_LEN),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=40,
-                    max=500,
-                    step=10,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(40, 500, 10),
             vol.Optional(
                 CONF_KEEP_EDGE_MS,
                 default=defaults.get(CONF_KEEP_EDGE_MS, KEEP_EDGE_MS),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=500,
-                    step=10,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(0, 500, 10),
             vol.Optional(
                 CONF_CHUNK_GAP_MS,
                 default=defaults.get(CONF_CHUNK_GAP_MS, CHUNK_GAP_MS),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=100,
-                    step=1,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(0, 100, 1),
             vol.Optional(
                 CONF_SILENCE_THRESHOLD,
                 default=defaults.get(CONF_SILENCE_THRESHOLD, SILENCE_THRESHOLD),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=5000,
-                    step=50,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(0, 5000, 50),
             vol.Optional(
                 CONF_STREAM_FIRST_CHUNK_CHARS,
                 default=defaults.get(
                     CONF_STREAM_FIRST_CHUNK_CHARS, STREAM_FIRST_CHUNK_CHARS
                 ),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=200,
-                    step=5,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(0, 200, 5),
             vol.Optional(
                 CONF_SPEECH_SPEED,
                 default=defaults.get(CONF_SPEECH_SPEED, DEFAULT_SPEECH_SPEED),
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=MIN_SPEECH_SPEED,
-                    max=MAX_SPEECH_SPEED,
-                    step=0.05,
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            ),
+            ): _number(MIN_SPEECH_SPEED, MAX_SPEECH_SPEED, 0.05),
         }
     )
 
 
-class LiquidAiTtsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for LiquidAI TTS."""
+class LiquidAiFlowHandler(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for LiquidAI."""
 
     VERSION = 1
 
@@ -198,23 +174,30 @@ class LiquidAiTtsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the flow."""
         self._data: dict[str, Any] = {}
 
+    async def _async_check_connection(self, base_url: str) -> str | None:
+        """Return an error key when the server cannot be reached, else None."""
+        client = LiquidAiClient(async_create_clientsession(self.hass), base_url)
+        try:
+            await client.check_connection()
+        except LiquidAiNotReadyError as err:
+            LOGGER.warning("LiquidAI server not ready: %s", err)
+            return "not_ready"
+        except Exception as err:
+            LOGGER.warning("LiquidAI connection check failed: %s", err)
+            return "cannot_connect"
+        return None
+
     async def async_step_user(
         self,
         user_input: dict[str, Any] | None = None,
-    ) -> config_entries.FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
         errors: dict[str, str] = {}
         if user_input is not None:
             base_url = user_input[CONF_BASE_URL].rstrip("/")
-            client = LiquidAiTtsClient(
-                async_create_clientsession(self.hass),
-                base_url,
-            )
-            try:
-                await client.check_connection()
-            except Exception as err:
-                LOGGER.warning("LiquidAI connection check failed: %s", err)
-                errors["base"] = "cannot_connect"
+            error = await self._async_check_connection(base_url)
+            if error:
+                errors["base"] = error
             else:
                 await self.async_set_unique_id(base_url)
                 self._abort_if_unique_id_configured()
@@ -230,7 +213,7 @@ class LiquidAiTtsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_prompt(
         self,
         user_input: dict[str, Any] | None = None,
-    ) -> config_entries.FlowResult:
+    ) -> ConfigFlowResult:
         """Configure prompt and timeout."""
         if user_input is not None:
             self._data.update(user_input)
@@ -244,8 +227,8 @@ class LiquidAiTtsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_advanced(
         self,
         user_input: dict[str, Any] | None = None,
-    ) -> config_entries.FlowResult:
-        """Configure advanced audio tuning options."""
+    ) -> ConfigFlowResult:
+        """Configure speaker embedding and audio tuning options."""
         if user_input is not None:
             return self.async_create_entry(
                 title="LiquidAI",
@@ -255,34 +238,76 @@ class LiquidAiTtsFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="advanced",
-            data_schema=_advanced_schema(),
+            data_schema=_options_schema(),
+        )
+
+    async def async_step_reconfigure(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Change server URL, prompts or timeout of an existing entry."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            base_url = user_input[CONF_BASE_URL].rstrip("/")
+            error = await self._async_check_connection(base_url)
+            if error:
+                errors["base"] = error
+            elif self._url_used_by_other_entry(entry, base_url):
+                return self.async_abort(reason="already_configured")
+            else:
+                data_updates = {
+                    key: user_input[key] for key in CONNECTION_KEYS if key in user_input
+                }
+                data_updates[CONF_BASE_URL] = base_url
+                return self.async_update_reload_and_abort(
+                    entry,
+                    unique_id=base_url,
+                    data_updates=data_updates,
+                )
+
+        defaults = {**entry.data, **(user_input or {})}
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=_reconfigure_schema(defaults),
+            errors=errors,
+        )
+
+    def _url_used_by_other_entry(self, entry: ConfigEntry, base_url: str) -> bool:
+        """Return True when another entry already points at base_url."""
+        return any(
+            other.entry_id != entry.entry_id and other.unique_id == base_url
+            for other in self._async_current_entries()
         )
 
     @staticmethod
     @callback
     def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> LiquidAiTtsOptionsFlowHandler:
+        config_entry: ConfigEntry,
+    ) -> LiquidAiOptionsFlowHandler:
         """Return the options flow handler."""
-        return LiquidAiTtsOptionsFlowHandler(config_entry)
+        return LiquidAiOptionsFlowHandler()
 
 
-class LiquidAiTtsOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options for LiquidAI TTS."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self._config_entry = config_entry
+class LiquidAiOptionsFlowHandler(OptionsFlow):
+    """Handle options for LiquidAI."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.FlowResult:
-        """Manage advanced options."""
+    ) -> ConfigFlowResult:
+        """Manage speaker embedding and audio options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        defaults = {**self._config_entry.options}
+        # Older entries stored speaker_embed_enabled in data; pre-fill from it.
+        defaults = {
+            CONF_SPEAKER_EMBED_ENABLED: self.config_entry.data.get(
+                CONF_SPEAKER_EMBED_ENABLED, DEFAULT_SPEAKER_EMBED_ENABLED
+            ),
+            **self.config_entry.options,
+        }
         return self.async_show_form(
             step_id="init",
-            data_schema=_advanced_schema(defaults),
+            data_schema=_options_schema(defaults),
         )

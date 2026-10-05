@@ -14,15 +14,15 @@
         "data": {
           "system_prompt": "TTS system prompt",
           "asr_system_prompt": "ASR system prompt",
-          "timeout": "Timeout (seconds)",
-          "speaker_embed_enabled": "Enable speaker embedding",
-          "speaker_embed_timeout": "Speaker embed timeout (seconds)"
+          "timeout": "Timeout (seconds)"
         }
       },
       "advanced": {
-        "title": "Advanced audio tuning",
-        "description": "Fine-tune chunking and PCM trimming (defaults match n8n production).",
+        "title": "Speaker embedding and audio tuning",
+        "description": "Optional voice fingerprinting and PCM trimming. All of these can be changed later under Configure.",
         "data": {
+          "speaker_embed_enabled": "Enable speaker embedding",
+          "speaker_embed_grace": "Wait for embedding after ASR (seconds)",
           "max_chunk_len": "Maximum chunk length",
           "keep_edge_ms": "Keep edge (ms)",
           "chunk_gap_ms": "Chunk gap (ms)",
@@ -30,17 +30,34 @@
           "stream_first_chunk_chars": "Stream first chunk after (chars)",
           "speech_speed": "Speech speed"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure LiquidAI",
+        "description": "Change the server URL, system prompts or request timeout.",
+        "data": {
+          "base_url": "Base URL",
+          "system_prompt": "TTS system prompt",
+          "asr_system_prompt": "ASR system prompt",
+          "timeout": "Timeout (seconds)"
+        }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to the LiquidAI server."
+      "cannot_connect": "Cannot connect to the LiquidAI server.",
+      "not_ready": "The LiquidAI server is reachable but its audio model is still loading. Try again in a minute."
+    },
+    "abort": {
+      "already_configured": "This LiquidAI server is already configured.",
+      "reconfigure_successful": "LiquidAI settings updated."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Advanced audio tuning",
+        "title": "Speaker embedding and audio tuning",
         "data": {
+          "speaker_embed_enabled": "Enable speaker embedding",
+          "speaker_embed_grace": "Wait for embedding after ASR (seconds)",
           "max_chunk_len": "Maximum chunk length",
           "keep_edge_ms": "Keep edge (ms)",
           "chunk_gap_ms": "Chunk gap (ms)",
