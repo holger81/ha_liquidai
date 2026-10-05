@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -32,6 +33,7 @@ from .audio import (
     rebuild_wav,
     sanitize_for_tts,
     split_for_tts,
+    trim_leading_pcm_silence,
     trim_pcm_silence,
 )
 from .client import LiquidAiClient
@@ -60,7 +62,6 @@ from .const import (
     STREAM_FIRST_CHUNK_CHARS,
     SUPPORTED_LANGUAGES,
     TTS_MAX_CONCURRENT_REQUESTS,
-    TTS_PCM_SLICE_MS,
 )
 
 # HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
@@ -299,59 +300,127 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
     async def _stream_sentence_mp3(
         self, text: str
     ) -> AsyncGenerator[bytes, None]:
-        """Consume /ws-audio PCM and yield MP3 slices for one sentence."""
-        buf = bytearray()
+        """Yield MP3 as PCM arrives, using one continuous ffmpeg encode.
+
+        HA concatenates yielded chunks into one media stream. Separate MP3
+        *files* per slice (each with its own encoder delay) click/warble when
+        joined. A single ffmpeg process fed raw s16le PCM produces one
+        continuous MP3 bitstream that can be yielded in fragments safely.
+        """
+        pcm_agen = self._client.synthesize_pcm_stream(text).__aiter__()
+        pending: bytearray = bytearray()
         sample_rate = DEFAULT_SAMPLE_RATE
-        started = False
-        slice_bytes = max(2, DEFAULT_SAMPLE_RATE * 2 * TTS_PCM_SLICE_MS // 1000)
+        max_leading = DEFAULT_SAMPLE_RATE * 2 * 2
 
-        async for pcm, sr in self._client.synthesize_pcm_stream(text):
-            sample_rate = sr
-            slice_bytes = max(2, sample_rate * 2 * TTS_PCM_SLICE_MS // 1000)
-            buf.extend(pcm)
-
-            if not started:
-                if not pcm_has_signal(bytes(buf), threshold=self.silence_threshold):
-                    # Drop long leading silence so it never becomes a first chunk.
-                    if len(buf) >= slice_bytes * 4:
-                        buf.clear()
-                    continue
-                buf = bytearray(
-                    trim_pcm_silence(
-                        bytes(buf),
+        # Wait for speech before starting the encoder (skip model lead-in).
+        while True:
+            try:
+                pcm, sample_rate = await pcm_agen.__anext__()
+            except StopAsyncIteration:
+                return
+            max_leading = sample_rate * 2 * 2
+            pending.extend(pcm)
+            if pcm_has_signal(bytes(pending), threshold=self.silence_threshold):
+                pending = bytearray(
+                    trim_leading_pcm_silence(
+                        bytes(pending),
                         sample_rate,
                         threshold=self.silence_threshold,
                         keep_edge_ms=self.keep_edge_ms,
                     )
                 )
-                started = True
+                break
+            if len(pending) >= max_leading:
+                pending.clear()
 
-            while len(buf) >= slice_bytes:
-                chunk = bytes(buf[:slice_bytes])
-                del buf[:slice_bytes]
-                mp3 = await self._encode_pcm_slice(chunk, sample_rate)
-                if mp3:
-                    yield mp3
+        process = await self._spawn_pcm_mp3_encoder(sample_rate)
+        assert process.stdin is not None
+        assert process.stdout is not None
 
-        if started and buf:
-            trimmed = trim_pcm_silence(
-                bytes(buf),
-                sample_rate,
-                threshold=self.silence_threshold,
-                keep_edge_ms=self.keep_edge_ms,
+        async def _write_pcm() -> None:
+            try:
+                if pending:
+                    process.stdin.write(bytes(pending))
+                    await process.stdin.drain()
+                async for pcm, _sr in pcm_agen:
+                    if not pcm:
+                        continue
+                    # Keep int16 frame alignment if a chunk is odd-sized.
+                    if len(pcm) & 1:
+                        pcm = pcm[:-1]
+                    if pcm:
+                        process.stdin.write(pcm)
+                        await process.stdin.drain()
+            finally:
+                process.stdin.close()
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    await process.stdin.wait_closed()
+
+        writer = asyncio.create_task(_write_pcm())
+        try:
+            while True:
+                chunk = await process.stdout.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+            await writer
+            stderr = (
+                await process.stderr.read() if process.stderr is not None else b""
             )
-            if not pcm_has_signal(trimmed, threshold=self.silence_threshold):
-                return
-            mp3 = await self._encode_pcm_slice(trimmed, sample_rate)
-            if mp3:
-                yield mp3
+            code = await process.wait()
+            if code:
+                detail = stderr.decode(errors="replace").strip()
+                raise HomeAssistantError(
+                    f"ffmpeg PCM→MP3 stream failed: {detail or code}"
+                )
+        except Exception:
+            if not writer.done():
+                writer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await writer
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            raise
 
-    async def _encode_pcm_slice(self, pcm: bytes, sample_rate: int) -> bytes:
-        """Wrap a PCM slice as WAV and encode to MP3 (with optional speed)."""
-        if not pcm:
-            return b""
-        wav = pcm_to_wav(pcm, sample_rate=sample_rate)
-        return await self._convert_wav_to_mp3(wav, streaming=True)
+    async def _spawn_pcm_mp3_encoder(
+        self, sample_rate: int
+    ) -> asyncio.subprocess.Process:
+        """Start ffmpeg reading raw s16le mono PCM and writing an MP3 stream."""
+        ffmpeg_manager = ffmpeg.get_ffmpeg_manager(self.hass)
+        command = [
+            ffmpeg_manager.binary,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-i",
+            "pipe:0",
+        ]
+        if self.speech_speed != 1.0:
+            command.extend(["-filter:a", f"atempo={self.speech_speed}"])
+        # flush_packets: emit MP3 frames as PCM arrives (lower time-to-first-audio)
+        command.extend(
+            [
+                "-f",
+                "mp3",
+                "-q:a",
+                "2",
+                "-flush_packets",
+                "1",
+                "pipe:1",
+            ]
+        )
+        return await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
 
     async def _trim_and_encode(self, wav: bytes) -> bytes:
         """Trim silence (off-loop) and encode the sentence to MP3."""

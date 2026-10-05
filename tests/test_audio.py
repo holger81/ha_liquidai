@@ -131,6 +131,19 @@ def test_pcm_has_signal_detects_loud_samples() -> None:
     assert audio.pcm_has_signal(speech, threshold=350) is True
 
 
+def test_trim_leading_pcm_silence_keeps_trailing() -> None:
+    silence = b"\x00\x00" * 1000
+    speech = struct.pack("<h", 5000) * 200
+    trailing = b"\x00\x00" * 800
+    pcm = silence + speech + trailing
+    trimmed = audio.trim_leading_pcm_silence(
+        pcm, 24000, threshold=350, keep_edge_ms=0
+    )
+    assert trimmed.startswith(speech[:4]) or struct.pack("<h", 5000) in trimmed[:4]
+    # Trailing silence must survive — more PCM may still arrive.
+    assert trimmed.endswith(trailing)
+
+
 def test_trim_pcm_silence_preserves_edges() -> None:
     sample_rate = 24000
     silence = b"\x00\x00" * 3000

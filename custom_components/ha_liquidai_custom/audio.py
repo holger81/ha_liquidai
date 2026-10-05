@@ -302,6 +302,28 @@ def pcm_has_signal(
     return _first_loud_index(samples, threshold) is not None
 
 
+def trim_leading_pcm_silence(
+    pcm: bytes,
+    sample_rate: int,
+    *,
+    threshold: int = SILENCE_THRESHOLD,
+    keep_edge_ms: int = KEEP_EDGE_MS,
+) -> bytes:
+    """Drop leading silence only (safe while more PCM may still arrive)."""
+    if not pcm:
+        return pcm
+    keep_edge_samples = max(1, (sample_rate * keep_edge_ms) // 1000)
+    num_samples = len(pcm) // 2
+    if num_samples == 0:
+        return pcm
+    samples = _pcm16_to_samples(pcm[: num_samples * 2])
+    first = _first_loud_index(samples, threshold)
+    if first is None:
+        return b""
+    start = max(0, first - keep_edge_samples)
+    return pcm[start * 2 : num_samples * 2]
+
+
 def make_silence_pcm(sample_rate: int, ms: int) -> bytes:
     """Create silent PCM data."""
     samples = max(0, (sample_rate * ms) // 1000)

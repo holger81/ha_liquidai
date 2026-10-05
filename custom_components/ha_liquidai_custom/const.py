@@ -54,8 +54,6 @@ MIN_SPEECH_SPEED = 0.75
 MAX_SPEECH_SPEED = 1.5
 STREAM_FIRST_CHUNK_CHARS = 15
 DEFAULT_STREAM_PCM = True
-# How much PCM to buffer before encoding the next MP3 slice (~ffmpeg overhead).
-TTS_PCM_SLICE_MS = 300
 DEFAULT_SAMPLE_RATE = 24000
 
 SUPPORTED_LANGUAGES = ["en", "en-US"]

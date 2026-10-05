@@ -21,6 +21,64 @@ def _wav(pcm: bytes, sample_rate: int = 24000) -> bytes:
 
 LOUD_WAV = _wav(b"\x00\x00" * 500 + struct.pack("<h", 20000) * 2000 + b"\x00\x00" * 500)
 
+# Emit a fake MP3 fragment after this much PCM (~100 ms at 24 kHz mono int16).
+_FAKE_ENCODER_SLICE = 2400 * 2
+
+
+class _FakeEncoderProcess:
+    """Stand-in for ffmpeg: emit MP3-tagged chunks as PCM is written."""
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self._pcm = bytearray()
+        self._out: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._chunks_emitted = 0
+        self.stdin = self
+        self.stdout = self
+        self.stderr = self
+
+    def write(self, data: bytes) -> None:
+        self._pcm.extend(data)
+        while len(self._pcm) >= _FAKE_ENCODER_SLICE:
+            piece = bytes(self._pcm[:_FAKE_ENCODER_SLICE])
+            del self._pcm[:_FAKE_ENCODER_SLICE]
+            self._chunks_emitted += 1
+            self._out.put_nowait(
+                b"mp3:" + piece[:4] + len(piece).to_bytes(4, "little")
+            )
+
+    async def drain(self) -> None:
+        await asyncio.sleep(0)
+
+    def close(self) -> None:
+        if self._pcm:
+            piece = bytes(self._pcm)
+            self._pcm.clear()
+            self._chunks_emitted += 1
+            self._out.put_nowait(
+                b"mp3:" + piece[:4] + len(piece).to_bytes(4, "little")
+            )
+        self._out.put_nowait(None)
+
+    async def wait_closed(self) -> None:
+        return None
+
+    async def read(self, n: int = -1) -> bytes:
+        # stdout and stderr both use this; stderr drain uses read() without size
+        # after stdin is closed — return empty for stderr-style full reads when
+        # the queue is idle after EOF. Distinguish via n: ffmpeg stdout uses 4096.
+        if n == -1:
+            return b""
+        item = await self._out.get()
+        return b"" if item is None else item
+
+    async def wait(self) -> int:
+        self.returncode = 0
+        return 0
+
+    def kill(self) -> None:
+        self._out.put_nowait(None)
+
 
 def _make_entity(options: dict | None = None) -> tts.LiquidAiTtsEntity:
     entity = tts.LiquidAiTtsEntity.__new__(tts.LiquidAiTtsEntity)
@@ -39,6 +97,9 @@ def _make_entity(options: dict | None = None) -> tts.LiquidAiTtsEntity:
         side_effect=lambda wav, *, output_format, streaming=False: (
             f"{output_format}:".encode() + wav[:4] + len(wav).to_bytes(4, "little")
         )
+    )
+    entity._spawn_pcm_mp3_encoder = AsyncMock(
+        side_effect=lambda _sr: _FakeEncoderProcess()
     )
     return entity
 
@@ -210,29 +271,41 @@ async def test_trim_runs_in_executor():
 
 
 @pytest.mark.asyncio
-async def test_stream_pcm_yields_mp3_slices_before_sentence_ends():
-    """WebSocket PCM path should encode slices as frames arrive."""
+async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
+    """Continuous ffmpeg encode must emit audio while PCM is still arriving."""
     entity = _make_entity(
         {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
     )
-    # ~100 ms loud frames at 24 kHz; three frames => one 300 ms slice + remainder.
-    frame = struct.pack("<h", 20000) * 2400
+    frame = struct.pack("<h", 20000) * 2400  # 100 ms
+    released = asyncio.Event()
 
     async def pcm_stream(_text: str):
-        for _ in range(3):
-            yield frame, 24000
+        yield frame, 24000
+        yield frame, 24000
+        # Block until the consumer has seen at least one MP3 fragment.
+        await released.wait()
+        yield frame, 24000
 
     entity._client.synthesize_pcm_stream = pcm_stream
-
     response = await entity.async_stream_tts_audio(
         TTSAudioRequest(message_gen=_gen("Hello there."))
     )
-    chunks = await _collect(response.data_gen)
+
+    chunks: list[bytes] = []
+    agen = response.data_gen.__aiter__()
+    first = await asyncio.wait_for(agen.__anext__(), timeout=1)
+    chunks.append(first)
+    released.set()
+    async for chunk in agen:
+        chunks.append(chunk)
 
     assert response.extension == "mp3"
-    assert len(chunks) >= 1
-    assert all(c.startswith(b"mp3:RIFF") for c in chunks)
+    assert len(chunks) >= 2
+    assert all(c.startswith(b"mp3:") for c in chunks)
     entity._client.synthesize.assert_not_called()
+    entity._spawn_pcm_mp3_encoder.assert_awaited()
+    # Not the one-shot WAV→MP3 path.
+    entity._ffmpeg_wav.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -271,11 +344,15 @@ async def test_stream_pcm_skips_leading_silence():
         yield speech, 24000
 
     entity._client.synthesize_pcm_stream = pcm_stream
+    fake = _FakeEncoderProcess()
+    entity._spawn_pcm_mp3_encoder = AsyncMock(return_value=fake)
 
     response = await entity.async_stream_tts_audio(
         TTSAudioRequest(message_gen=_gen("Hi."))
     )
     chunks = await _collect(response.data_gen)
     assert len(chunks) >= 1
-    # Encoded payload should be speech-sized, not silence+speech.
-    assert entity._ffmpeg_wav.await_count >= 1
+    # 300 ms speech + ~100 ms keep_edge → four 100 ms encoder slices, not the
+    # 200 ms of leading silence that was discarded before the encoder started.
+    assert fake._chunks_emitted == 4
+    assert len(chunks) == 4
