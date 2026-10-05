@@ -64,6 +64,7 @@ from .const import (
     TTS_MAX_CONCURRENT_REQUESTS,
     TTS_PCM_FIRST_MP3_BYTES,
     TTS_PCM_MP3_BITRATE_K,
+    TTS_PCM_PREAMBLE_MS,
 )
 
 # HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
@@ -95,6 +96,8 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self._synth_semaphore = asyncio.Semaphore(TTS_MAX_CONCURRENT_REQUESTS)
         # Encoded inter-sentence silence, keyed by (sample_rate, gap_ms, speed).
         self._gap_mp3_cache: dict[tuple[int, int, float], bytes] = {}
+        # Silent keepalive MP3, keyed by (sample_rate, speed, preamble_ms).
+        self._preamble_mp3_cache: dict[tuple[int, float, int], bytes] = {}
         self._attr_name = "LiquidAI TTS"
         self._attr_unique_id = entry.entry_id
         self._attr_supported_languages = SUPPORTED_LANGUAGES
@@ -264,6 +267,12 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self, request: TTSAudioRequest
     ) -> AsyncGenerator[bytes, None]:
         """WebSocket path: yield MP3 slices as PCM frames arrive per sentence."""
+        # Keepalive: Assist satellites often time out if the HTTP body stays
+        # empty while the LLM produces the first sentence / Liquid warms up.
+        preamble = await self._silent_mp3_preamble()
+        if preamble:
+            yield preamble
+
         sample_rate = DEFAULT_SAMPLE_RATE
         template_wav = pcm_to_wav(b"\x00\x00", sample_rate=sample_rate)
         first_sentence = True
@@ -461,6 +470,20 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         gap_mp3 = await self._convert_wav_to_mp3(gap_wav, streaming=True)
         self._gap_mp3_cache[key] = gap_mp3
         return gap_mp3
+
+    async def _silent_mp3_preamble(self) -> bytes:
+        """Return a short silent MP3 used to open the Assist media stream."""
+        key = (DEFAULT_SAMPLE_RATE, self.speech_speed, TTS_PCM_PREAMBLE_MS)
+        cached = self._preamble_mp3_cache.get(key)
+        if cached is not None:
+            return cached
+        wav = pcm_to_wav(
+            make_silence_pcm(DEFAULT_SAMPLE_RATE, TTS_PCM_PREAMBLE_MS),
+            sample_rate=DEFAULT_SAMPLE_RATE,
+        )
+        mp3 = await self._convert_wav_to_mp3(wav, streaming=True)
+        self._preamble_mp3_cache[key] = mp3
+        return mp3
 
     def _trimmed_wav(self, wav: bytes) -> bytes:
         """Return a trimmed WAV buffer."""

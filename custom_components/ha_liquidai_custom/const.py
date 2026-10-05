@@ -60,6 +60,9 @@ DEFAULT_SAMPLE_RATE = 24000
 # header+frames, and encode the stream as constant bitrate.
 TTS_PCM_MP3_BITRATE_K = 128
 TTS_PCM_FIRST_MP3_BYTES = 8192
+# Short silent MP3 yielded immediately when Assist opens the TTS stream so
+# satellites do not hit their first-byte timeout while the LLM/Liquid catch up.
+TTS_PCM_PREAMBLE_MS = 80
 
 SUPPORTED_LANGUAGES = ["en", "en-US"]
 DEFAULT_LANGUAGE = "en-US"

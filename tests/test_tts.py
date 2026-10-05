@@ -90,6 +90,7 @@ def _make_entity(options: dict | None = None) -> tts.LiquidAiTtsEntity:
     entity._client.synthesize = AsyncMock(return_value=LOUD_WAV)
     entity._synth_semaphore = asyncio.Semaphore(tts.TTS_MAX_CONCURRENT_REQUESTS)
     entity._gap_mp3_cache = {}
+    entity._preamble_mp3_cache = {}
     # ffmpeg is not available in unit tests; tag the output instead.
     entity._ffmpeg_wav = AsyncMock(
         side_effect=lambda wav, *, output_format, streaming=False: (
@@ -269,6 +270,37 @@ async def test_trim_runs_in_executor():
 
 
 @pytest.mark.asyncio
+async def test_stream_pcm_yields_preamble_before_llm_text():
+    """Silent keepalive MP3 must be sent before waiting on the LLM stream."""
+    entity = _make_entity(
+        {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
+    )
+    release_text = asyncio.Event()
+
+    async def blocked_message() -> AsyncGenerator[str, None]:
+        await release_text.wait()
+        yield "Hello."
+
+    async def pcm_stream(_text: str):
+        yield struct.pack("<h", 20000) * 2400, 24000
+
+    entity._client.synthesize_pcm_stream = pcm_stream
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(message_gen=blocked_message())
+    )
+    agen = response.data_gen.__aiter__()
+    preamble = await asyncio.wait_for(agen.__anext__(), timeout=1)
+    assert preamble.startswith(b"mp3:")
+    assert entity._preamble_mp3_cache
+    # Must not have started Liquid synth yet — LLM text is still blocked.
+    entity._spawn_pcm_mp3_encoder.assert_not_awaited()
+    release_text.set()
+    rest = await _collect(agen)
+    assert rest
+    entity._spawn_pcm_mp3_encoder.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
     """Continuous ffmpeg encode must emit audio while PCM is still arriving."""
     entity = _make_entity(
@@ -281,7 +313,7 @@ async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
         # Two slices (~9.6 KB tagged) fill TTS_PCM_FIRST_MP3_BYTES (8 KB).
         yield frame, 24000
         yield frame, 24000
-        # Block until the consumer has seen the buffered first MP3 chunk.
+        # Block until the consumer has seen the buffered speech MP3 chunk.
         await released.wait()
         yield frame, 24000
 
@@ -292,20 +324,20 @@ async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
 
     chunks: list[bytes] = []
     agen = response.data_gen.__aiter__()
-    first = await asyncio.wait_for(agen.__anext__(), timeout=1)
-    chunks.append(first)
-    assert len(first) >= tts.TTS_PCM_FIRST_MP3_BYTES
+    preamble = await asyncio.wait_for(agen.__anext__(), timeout=1)
+    chunks.append(preamble)
+    speech = await asyncio.wait_for(agen.__anext__(), timeout=1)
+    chunks.append(speech)
+    assert len(speech) >= tts.TTS_PCM_FIRST_MP3_BYTES
     released.set()
     async for chunk in agen:
         chunks.append(chunk)
 
     assert response.extension == "mp3"
-    assert len(chunks) >= 2
+    assert len(chunks) >= 3
     assert all(c.startswith(b"mp3:") for c in chunks)
     entity._client.synthesize.assert_not_called()
     entity._spawn_pcm_mp3_encoder.assert_awaited()
-    # Not the one-shot WAV→MP3 path.
-    entity._ffmpeg_wav.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -326,7 +358,8 @@ async def test_stream_pcm_falls_back_to_http_on_error():
     )
     chunks = await _collect(response.data_gen)
 
-    assert len(chunks) == 1
+    # keepalive preamble + HTTP fallback sentence
+    assert len(chunks) == 2
     entity._client.synthesize.assert_awaited_once_with("Hello.")
 
 
@@ -351,8 +384,8 @@ async def test_stream_pcm_skips_leading_silence():
         TTSAudioRequest(message_gen=_gen("Hi."))
     )
     chunks = await _collect(response.data_gen)
-    assert len(chunks) >= 1
+    assert len(chunks) >= 2  # preamble + speech
     # 300 ms speech + ~100 ms keep_edge → four 100 ms encoder slices fed;
-    # leading silence was discarded. First MP3 yield is buffered (≥8 KB).
+    # leading silence was discarded. First speech MP3 yield is buffered (≥8 KB).
     assert fake._chunks_emitted == 4
-    assert sum(len(c) for c in chunks) >= tts.TTS_PCM_FIRST_MP3_BYTES
+    assert sum(len(c) for c in chunks[1:]) >= tts.TTS_PCM_FIRST_MP3_BYTES
