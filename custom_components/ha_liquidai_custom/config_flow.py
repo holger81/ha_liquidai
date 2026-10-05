@@ -28,11 +28,13 @@ from .const import (
     CONF_SPEAKER_EMBED_GRACE,
     CONF_SPEECH_SPEED,
     CONF_STREAM_FIRST_CHUNK_CHARS,
+    CONF_STREAM_PCM,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DEFAULT_ASR_SYSTEM_PROMPT,
     DEFAULT_SPEAKER_EMBED_ENABLED,
     DEFAULT_SPEECH_SPEED,
+    DEFAULT_STREAM_PCM,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     DEFAULT_URL,
@@ -157,6 +159,10 @@ def _options_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     CONF_STREAM_FIRST_CHUNK_CHARS, STREAM_FIRST_CHUNK_CHARS
                 ),
             ): _number(0, 200, 5),
+            vol.Optional(
+                CONF_STREAM_PCM,
+                default=defaults.get(CONF_STREAM_PCM, DEFAULT_STREAM_PCM),
+            ): selector.BooleanSelector(),
             vol.Optional(
                 CONF_SPEECH_SPEED,
                 default=defaults.get(CONF_SPEECH_SPEED, DEFAULT_SPEECH_SPEED),

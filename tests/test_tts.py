@@ -25,8 +25,10 @@ LOUD_WAV = _wav(b"\x00\x00" * 500 + struct.pack("<h", 20000) * 2000 + b"\x00\x00
 def _make_entity(options: dict | None = None) -> tts.LiquidAiTtsEntity:
     entity = tts.LiquidAiTtsEntity.__new__(tts.LiquidAiTtsEntity)
     entity.hass = make_hass()
+    # Existing HTTP-path tests opt out of the default WebSocket PCM stream.
+    merged = {"stream_pcm": False, **(options or {})}
     entity._entry = ConfigEntry(
-        data={"base_url": "http://example:8811"}, options=options or {}
+        data={"base_url": "http://example:8811"}, options=merged
     )
     entity._client = MagicMock()
     entity._client.synthesize = AsyncMock(return_value=LOUD_WAV)
@@ -205,3 +207,75 @@ async def test_trim_runs_in_executor():
     await entity.async_get_tts_audio("Hello.", "en-US", {})
 
     assert any(getattr(f, "__name__", "") == "_trimmed_wav" for f in calls)
+
+
+@pytest.mark.asyncio
+async def test_stream_pcm_yields_mp3_slices_before_sentence_ends():
+    """WebSocket PCM path should encode slices as frames arrive."""
+    entity = _make_entity(
+        {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
+    )
+    # ~100 ms loud frames at 24 kHz; three frames => one 300 ms slice + remainder.
+    frame = struct.pack("<h", 20000) * 2400
+
+    async def pcm_stream(_text: str):
+        for _ in range(3):
+            yield frame, 24000
+
+    entity._client.synthesize_pcm_stream = pcm_stream
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(message_gen=_gen("Hello there."))
+    )
+    chunks = await _collect(response.data_gen)
+
+    assert response.extension == "mp3"
+    assert len(chunks) >= 1
+    assert all(c.startswith(b"mp3:RIFF") for c in chunks)
+    entity._client.synthesize.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_pcm_falls_back_to_http_on_error():
+    entity = _make_entity(
+        {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
+    )
+
+    async def boom(_text: str):
+        raise tts.HomeAssistantError("ws down")
+        if False:  # pragma: no cover - keeps this an async generator
+            yield b"", 24000
+
+    entity._client.synthesize_pcm_stream = boom
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(message_gen=_gen("Hello."))
+    )
+    chunks = await _collect(response.data_gen)
+
+    assert len(chunks) == 1
+    entity._client.synthesize.assert_awaited_once_with("Hello.")
+
+
+@pytest.mark.asyncio
+async def test_stream_pcm_skips_leading_silence():
+    entity = _make_entity(
+        {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
+    )
+    silence = b"\x00\x00" * 2400
+    speech = struct.pack("<h", 20000) * 7200  # 300 ms
+
+    async def pcm_stream(_text: str):
+        yield silence, 24000
+        yield silence, 24000
+        yield speech, 24000
+
+    entity._client.synthesize_pcm_stream = pcm_stream
+
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(message_gen=_gen("Hi."))
+    )
+    chunks = await _collect(response.data_gen)
+    assert len(chunks) >= 1
+    # Encoded payload should be speech-sized, not silence+speech.
+    assert entity._ffmpeg_wav.await_count >= 1

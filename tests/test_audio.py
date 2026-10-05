@@ -124,6 +124,13 @@ def test_pop_early_chunk_keeps_word_separator_at_buffer_end() -> None:
     assert remainder == "kitchen"
 
 
+def test_pcm_has_signal_detects_loud_samples() -> None:
+    silence = b"\x00\x00" * 100
+    speech = silence + struct.pack("<h", 2000) + silence
+    assert audio.pcm_has_signal(silence, threshold=350) is False
+    assert audio.pcm_has_signal(speech, threshold=350) is True
+
+
 def test_trim_pcm_silence_preserves_edges() -> None:
     sample_rate = 24000
     silence = b"\x00\x00" * 3000

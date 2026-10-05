@@ -41,7 +41,7 @@ Details: [docs/voice-speaker-embed-plan.md](docs/voice-speaker-embed-plan.md)
 | Where | Settings |
 |-------|----------|
 | **Reconfigure** (⋮ menu on the entry) | Server URL, TTS/ASR system prompts, request timeout |
-| **Configure** (options) | Speaker embedding on/off and grace window, chunking, silence trimming, inter-sentence gap, speech speed |
+| **Configure** (options) | Speaker embedding on/off and grace window, chunking, silence trimming, inter-sentence gap, speech speed, WebSocket PCM streaming for Assist |
 | **Download diagnostics** | Redacted entry data, options, embed endpoint state, cached voice turns |
 
 Connection checks use `GET /healthz?ready=1`; a server that is still loading its model is reported as *not ready* rather than *cannot connect*.

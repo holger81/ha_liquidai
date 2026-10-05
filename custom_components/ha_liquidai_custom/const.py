@@ -19,6 +19,9 @@ CONF_CHUNK_GAP_MS = "chunk_gap_ms"
 CONF_SILENCE_THRESHOLD = "silence_threshold"
 CONF_SPEECH_SPEED = "speech_speed"
 CONF_STREAM_FIRST_CHUNK_CHARS = "stream_first_chunk_chars"
+# Assist streaming TTS: consume /ws-audio PCM frames and yield MP3 slices
+# instead of waiting for a full POST /v1/tts WAV per sentence.
+CONF_STREAM_PCM = "stream_pcm"
 
 DEFAULT_URL = "http://192.168.10.31:8811"
 DEFAULT_SYSTEM_PROMPT = "Perform TTS. Use the US female voice."
@@ -50,6 +53,9 @@ DEFAULT_SPEECH_SPEED = 1.0
 MIN_SPEECH_SPEED = 0.75
 MAX_SPEECH_SPEED = 1.5
 STREAM_FIRST_CHUNK_CHARS = 15
+DEFAULT_STREAM_PCM = True
+# How much PCM to buffer before encoding the next MP3 slice (~ffmpeg overhead).
+TTS_PCM_SLICE_MS = 300
 DEFAULT_SAMPLE_RATE = 24000
 
 SUPPORTED_LANGUAGES = ["en", "en-US"]

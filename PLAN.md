@@ -65,6 +65,7 @@ ha_liquidai/
 ### Phase 2 — Streaming TTS ✅
 
 - [x] `async_stream_tts_audio()` + Assist early playback (HA ≥ 2025.10)
+- [x] Optional WebSocket PCM streaming (`stream_pcm`, default on): `/ws-audio` → MP3 slices for lower time-to-first-audio; HTTP fallback if the socket fails before playback starts
 
 ### Phase 3 — LiquidAI STT ✅
 

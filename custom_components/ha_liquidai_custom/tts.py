@@ -24,6 +24,8 @@ from .audio import (
     concat_wav_buffers,
     extract_pcm,
     make_silence_pcm,
+    pcm_has_signal,
+    pcm_to_wav,
     pop_complete_sentence,
     pop_early_chunk,
     read_sample_rate,
@@ -42,10 +44,13 @@ from .const import (
     CONF_SILENCE_THRESHOLD,
     CONF_SPEECH_SPEED,
     CONF_STREAM_FIRST_CHUNK_CHARS,
+    CONF_STREAM_PCM,
     CONF_SYSTEM_PROMPT,
     CONF_TIMEOUT,
     DEFAULT_LANGUAGE,
+    DEFAULT_SAMPLE_RATE,
     DEFAULT_SPEECH_SPEED,
+    DEFAULT_STREAM_PCM,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     KEEP_EDGE_MS,
@@ -55,6 +60,7 @@ from .const import (
     STREAM_FIRST_CHUNK_CHARS,
     SUPPORTED_LANGUAGES,
     TTS_MAX_CONCURRENT_REQUESTS,
+    TTS_PCM_SLICE_MS,
 )
 
 # HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
@@ -129,6 +135,11 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             self._entry.options.get(CONF_SPEECH_SPEED, DEFAULT_SPEECH_SPEED)
         )
 
+    @property
+    def stream_pcm(self) -> bool:
+        """Return True when Assist TTS should stream PCM from /ws-audio."""
+        return bool(self._entry.options.get(CONF_STREAM_PCM, DEFAULT_STREAM_PCM))
+
     async def async_get_tts_audio(
         self, message: str, language: str, options: dict[str, Any]
     ) -> TtsAudioType:
@@ -186,6 +197,17 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self, request: TTSAudioRequest
     ) -> AsyncGenerator[bytes, None]:
         """Yield mp3 chunks for each completed sentence."""
+        if self.stream_pcm:
+            async for chunk in self._audio_gen_pcm(request):
+                yield chunk
+            return
+        async for chunk in self._audio_gen_http(request):
+            yield chunk
+
+    async def _audio_gen_http(
+        self, request: TTSAudioRequest
+    ) -> AsyncGenerator[bytes, None]:
+        """HTTP path: wait for each full WAV, prefetch the next sentence."""
         sentence_iter = self._message_to_sentences(request.message_gen).__aiter__()
         template_wav: bytes | None = None
         sample_rate: int | None = None
@@ -234,6 +256,102 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 gap_mp3 = await self._gap_mp3(template_wav, sample_rate)
                 if gap_mp3:
                     yield gap_mp3
+
+    async def _audio_gen_pcm(
+        self, request: TTSAudioRequest
+    ) -> AsyncGenerator[bytes, None]:
+        """WebSocket path: yield MP3 slices as PCM frames arrive per sentence."""
+        sample_rate = DEFAULT_SAMPLE_RATE
+        template_wav = pcm_to_wav(b"\x00\x00", sample_rate=sample_rate)
+        first_sentence = True
+
+        async for sentence in self._message_to_sentences(request.message_gen):
+            if not first_sentence and self.chunk_gap_ms > 0:
+                gap_mp3 = await self._gap_mp3(template_wav, sample_rate)
+                if gap_mp3:
+                    yield gap_mp3
+            first_sentence = False
+
+            yielded = False
+            try:
+                async for mp3 in self._stream_sentence_mp3(sentence):
+                    yielded = True
+                    yield mp3
+            except HomeAssistantError as err:
+                if yielded:
+                    # Avoid re-synthesizing a sentence the satellite already started.
+                    LOGGER.warning(
+                        "PCM stream failed mid-sentence after playback started: %s",
+                        err,
+                    )
+                    raise
+                LOGGER.warning(
+                    "PCM stream failed for sentence, falling back to HTTP: %s",
+                    err,
+                )
+                wav = await self._client.synthesize(sentence)
+                sample_rate = read_sample_rate(wav)
+                template_wav = wav
+                mp3 = await self._trim_and_encode(wav)
+                if mp3:
+                    yield mp3
+
+    async def _stream_sentence_mp3(
+        self, text: str
+    ) -> AsyncGenerator[bytes, None]:
+        """Consume /ws-audio PCM and yield MP3 slices for one sentence."""
+        buf = bytearray()
+        sample_rate = DEFAULT_SAMPLE_RATE
+        started = False
+        slice_bytes = max(2, DEFAULT_SAMPLE_RATE * 2 * TTS_PCM_SLICE_MS // 1000)
+
+        async for pcm, sr in self._client.synthesize_pcm_stream(text):
+            sample_rate = sr
+            slice_bytes = max(2, sample_rate * 2 * TTS_PCM_SLICE_MS // 1000)
+            buf.extend(pcm)
+
+            if not started:
+                if not pcm_has_signal(bytes(buf), threshold=self.silence_threshold):
+                    # Drop long leading silence so it never becomes a first chunk.
+                    if len(buf) >= slice_bytes * 4:
+                        buf.clear()
+                    continue
+                buf = bytearray(
+                    trim_pcm_silence(
+                        bytes(buf),
+                        sample_rate,
+                        threshold=self.silence_threshold,
+                        keep_edge_ms=self.keep_edge_ms,
+                    )
+                )
+                started = True
+
+            while len(buf) >= slice_bytes:
+                chunk = bytes(buf[:slice_bytes])
+                del buf[:slice_bytes]
+                mp3 = await self._encode_pcm_slice(chunk, sample_rate)
+                if mp3:
+                    yield mp3
+
+        if started and buf:
+            trimmed = trim_pcm_silence(
+                bytes(buf),
+                sample_rate,
+                threshold=self.silence_threshold,
+                keep_edge_ms=self.keep_edge_ms,
+            )
+            if not pcm_has_signal(trimmed, threshold=self.silence_threshold):
+                return
+            mp3 = await self._encode_pcm_slice(trimmed, sample_rate)
+            if mp3:
+                yield mp3
+
+    async def _encode_pcm_slice(self, pcm: bytes, sample_rate: int) -> bytes:
+        """Wrap a PCM slice as WAV and encode to MP3 (with optional speed)."""
+        if not pcm:
+            return b""
+        wav = pcm_to_wav(pcm, sample_rate=sample_rate)
+        return await self._convert_wav_to_mp3(wav, streaming=True)
 
     async def _trim_and_encode(self, wav: bytes) -> bytes:
         """Trim silence (off-loop) and encode the sentence to MP3."""

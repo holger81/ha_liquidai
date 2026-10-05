@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 
 from conftest import load_component_module
@@ -83,6 +85,82 @@ async def test_synthesize_raises_typed_http_error() -> None:
         await liquid_client.synthesize("hello")
 
     assert info.value.status == 503
+
+
+def _ws_message(payload: dict[str, Any]) -> MagicMock:
+    msg = MagicMock()
+    msg.type = aiohttp.WSMsgType.TEXT
+    msg.json = MagicMock(return_value=payload)
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_synthesize_pcm_stream_yields_frames_and_stops_on_done() -> None:
+    pcm = b"\x00\x01" * 8
+    messages = [
+        _ws_message(
+            {
+                "type": "audio",
+                "data": base64.b64encode(pcm).decode(),
+                "sample_rate": 24000,
+            }
+        ),
+        _ws_message({"type": "done"}),
+    ]
+
+    websocket = MagicMock()
+    websocket.__aenter__ = AsyncMock(return_value=websocket)
+    websocket.__aexit__ = AsyncMock(return_value=None)
+    websocket.send_json = AsyncMock()
+
+    async def _iter():
+        for msg in messages:
+            yield msg
+
+    websocket.__aiter__ = lambda self: _iter()
+
+    session = MagicMock()
+    session.ws_connect = MagicMock(return_value=websocket)
+    liquid_client = client.LiquidAiClient(
+        session,
+        "http://example:8811",
+        system_prompt="Perform TTS. Use the US female voice.",
+    )
+
+    frames = [item async for item in liquid_client.synthesize_pcm_stream("Hello")]
+
+    assert frames == [(pcm, 24000)]
+    session.ws_connect.assert_called_once()
+    assert session.ws_connect.call_args.args[0] == "ws://example:8811/ws-audio"
+    websocket.send_json.assert_awaited_once_with(
+        {
+            "mode": "tts",
+            "text": "Hello",
+            "system_prompt": "Perform TTS. Use the US female voice.",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_synthesize_pcm_stream_raises_on_server_error() -> None:
+    websocket = MagicMock()
+    websocket.__aenter__ = AsyncMock(return_value=websocket)
+    websocket.__aexit__ = AsyncMock(return_value=None)
+    websocket.send_json = AsyncMock()
+
+    async def _iter():
+        yield _ws_message({"type": "error", "data": "busy"})
+
+    websocket.__aiter__ = lambda self: _iter()
+    session = MagicMock()
+    session.ws_connect = MagicMock(return_value=websocket)
+    liquid_client = client.LiquidAiClient(session, "https://example:8811")
+
+    with pytest.raises(client.HomeAssistantError, match="TTS stream error: busy"):
+        async for _ in liquid_client.synthesize_pcm_stream("Hi"):
+            pass
+
+    assert session.ws_connect.call_args.args[0] == "wss://example:8811/ws-audio"
 
 
 @pytest.mark.asyncio

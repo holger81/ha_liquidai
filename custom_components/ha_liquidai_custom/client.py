@@ -1,14 +1,18 @@
-"""HTTP client for the LiquidAI audio server (/v1/asr, /v1/tts, /v1/speaker/embed)."""
+"""HTTP/WebSocket client for the LiquidAI audio server."""
 
 from __future__ import annotations
 
+import base64
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     DEFAULT_ASR_SYSTEM_PROMPT,
+    DEFAULT_SAMPLE_RATE,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TIMEOUT,
     EMBED_SOFT_QUALITIES,
@@ -19,6 +23,7 @@ if TYPE_CHECKING:
     from aiohttp import ClientSession
 
 HEALTHZ_PATH = "/healthz"
+WS_AUDIO_PATH = "/ws-audio"
 CONNECTION_CHECK_TIMEOUT = 10
 
 
@@ -103,6 +108,16 @@ class LiquidAiClient:
         except aiohttp.ClientError as err:
             raise HomeAssistantError(f"Cannot connect to LiquidAI: {err}") from err
 
+    def _ws_audio_url(self) -> str:
+        """Return the WebSocket URL for /ws-audio."""
+        parsed = urlparse(self._base_url)
+        scheme = {"http": "ws", "https": "wss"}.get(parsed.scheme, parsed.scheme)
+        return urlunparse(
+            parsed._replace(
+                scheme=scheme, path=WS_AUDIO_PATH, query="", fragment=""
+            )
+        )
+
     async def synthesize(self, text: str) -> bytes:
         """Synthesize speech and return raw WAV bytes."""
         if not text.strip():
@@ -138,6 +153,69 @@ class LiquidAiClient:
             len(text),
         )
         return wav_bytes
+
+    async def synthesize_pcm_stream(
+        self, text: str
+    ) -> AsyncGenerator[tuple[bytes, int], None]:
+        """Yield (int16 PCM, sample_rate) frames from ``/ws-audio``.
+
+        Sends one TTS turn with the configured system prompt. The generator
+        completes when the server sends ``{"type": "done"}``.
+        """
+        if not text.strip():
+            raise HomeAssistantError("No speakable text for TTS")
+
+        url = self._ws_audio_url()
+        try:
+            async with self._session.ws_connect(
+                url,
+                heartbeat=30,
+                timeout=self._timeout.total,
+            ) as websocket:
+                await websocket.send_json(
+                    {
+                        "mode": "tts",
+                        "text": text,
+                        "system_prompt": self._system_prompt,
+                    }
+                )
+                async for msg in websocket:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        payload = msg.json()
+                        kind = payload.get("type")
+                        if kind == "audio" and payload.get("data"):
+                            try:
+                                pcm = base64.b64decode(payload["data"], validate=True)
+                            except (ValueError, TypeError) as err:
+                                raise HomeAssistantError(
+                                    "LiquidAI TTS stream returned invalid audio"
+                                ) from err
+                            if pcm:
+                                sample_rate = int(
+                                    payload.get("sample_rate") or DEFAULT_SAMPLE_RATE
+                                )
+                                yield pcm, sample_rate
+                        elif kind == "done":
+                            return
+                        elif kind == "error":
+                            detail = str(payload.get("data") or "unknown error")
+                            raise HomeAssistantError(
+                                f"LiquidAI TTS stream error: {detail}"
+                            )
+                    elif msg.type in (
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSING,
+                        aiohttp.WSMsgType.CLOSED,
+                    ):
+                        return
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        raise HomeAssistantError(
+                            f"LiquidAI TTS WebSocket error: {websocket.exception()}"
+                        )
+        except TimeoutError as err:
+            raise HomeAssistantError("LiquidAI TTS stream timed out") from err
+        except aiohttp.ClientError as err:
+            raise HomeAssistantError(f"LiquidAI TTS stream failed: {err}") from err
 
     async def transcribe(
         self,

@@ -292,6 +292,16 @@ def _last_loud_index(samples: array, threshold: int) -> int | None:
     return None
 
 
+def pcm_has_signal(
+    pcm: bytes, *, threshold: int = SILENCE_THRESHOLD
+) -> bool:
+    """Return True when any 16-bit sample exceeds the silence threshold."""
+    if len(pcm) < 2:
+        return False
+    samples = _pcm16_to_samples(pcm[: len(pcm) - (len(pcm) % 2)])
+    return _first_loud_index(samples, threshold) is not None
+
+
 def make_silence_pcm(sample_rate: int, ms: int) -> bytes:
     """Create silent PCM data."""
     samples = max(0, (sample_rate * ms) // 1000)
