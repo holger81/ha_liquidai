@@ -1,0 +1,17 @@
+---
+description: After commit+push on main, bump version, tag, and create a GitHub release
+alwaysApply: true
+---
+
+# Release after commit and push
+
+When the user asks to commit and push (or a diff-tab commit-and-push) on this repo or **liquidai-audio-docker**:
+
+1. Commit and push as requested.
+2. **Also** cut a GitHub release in the same turn (do not wait to be asked):
+   - Bump the version (`manifest.json` for ha_liquidai; `pyproject.toml` + compose image tag for liquidai-audio when relevant).
+   - Commit the version bump if it was not already in the feature commit.
+   - Create an annotated tag (`vX.Y.Z`) and push it.
+   - Run `gh release create` with concise notes for the changes just shipped.
+3. Patch bumps (`x.y.Z`) for fixes; minor (`x.Y.0`) for user-visible features.
+4. Return the release URL when done.
