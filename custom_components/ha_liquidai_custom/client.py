@@ -293,7 +293,7 @@ class LiquidAiClient:
         embedding = payload.get("embedding")
         quality = str(payload.get("quality") or "ok")
         if isinstance(embedding, list) and embedding:
-            if not all(isinstance(value, (int, float)) for value in embedding):
+            if not all(isinstance(value, int | float) for value in embedding):
                 raise HomeAssistantError(
                     "LiquidAI speaker embed returned non-numeric embedding"
                 )

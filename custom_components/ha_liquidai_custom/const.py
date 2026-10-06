@@ -19,8 +19,8 @@ CONF_CHUNK_GAP_MS = "chunk_gap_ms"
 CONF_SILENCE_THRESHOLD = "silence_threshold"
 CONF_SPEECH_SPEED = "speech_speed"
 CONF_STREAM_FIRST_CHUNK_CHARS = "stream_first_chunk_chars"
-# Assist streaming TTS: consume /ws-audio PCM frames and yield MP3 slices
-# instead of waiting for a full POST /v1/tts WAV per sentence.
+# Assist streaming TTS: consume /ws-audio PCM frames and yield a live WAV
+# (header + PCM) instead of waiting for a full POST /v1/tts per sentence.
 CONF_STREAM_PCM = "stream_pcm"
 
 DEFAULT_URL = "http://192.168.10.31:8811"
@@ -55,13 +55,8 @@ MAX_SPEECH_SPEED = 1.5
 STREAM_FIRST_CHUNK_CHARS = 15
 DEFAULT_STREAM_PCM = True
 DEFAULT_SAMPLE_RATE = 24000
-# Assist satellites (and HA's own transcoder) are unreliable with tiny/VBR
-# first MP3 fragments from a live encoder. Buffer until we have a solid
-# header+frames, and encode the stream as constant bitrate.
-TTS_PCM_MP3_BITRATE_K = 128
-TTS_PCM_FIRST_MP3_BYTES = 8192
-# Short silent MP3 yielded immediately when Assist opens the TTS stream so
-# satellites do not hit their first-byte timeout while the LLM/Liquid catch up.
+# Short silent PCM after the streaming WAV header so Assist opens the media
+# body immediately while the LLM / LiquidAI catch up.
 TTS_PCM_PREAMBLE_MS = 80
 
 SUPPORTED_LANGUAGES = ["en", "en-US"]

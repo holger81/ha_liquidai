@@ -21,50 +21,32 @@ def _wav(pcm: bytes, sample_rate: int = 24000) -> bytes:
 
 LOUD_WAV = _wav(b"\x00\x00" * 500 + struct.pack("<h", 20000) * 2000 + b"\x00\x00" * 500)
 
-# Emit a fake MP3 fragment after this much PCM (~100 ms at 24 kHz mono int16).
-_FAKE_ENCODER_SLICE = 2400 * 2
 
-
-class _FakeEncoderProcess:
-    """Stand-in for ffmpeg: emit MP3-tagged chunks as PCM is written."""
+class _FakeAtempoProcess:
+    """Stand-in for ffmpeg atempo: echo PCM written to stdin on stdout."""
 
     def __init__(self) -> None:
         self.returncode: int | None = None
-        self._pcm = bytearray()
         self._out: asyncio.Queue[bytes | None] = asyncio.Queue()
-        self._chunks_emitted = 0
         self.stdin = self
         self.stdout = self
         self.stderr = self
+        self.bytes_written = 0
 
     def write(self, data: bytes) -> None:
-        self._pcm.extend(data)
-        while len(self._pcm) >= _FAKE_ENCODER_SLICE:
-            piece = bytes(self._pcm[:_FAKE_ENCODER_SLICE])
-            del self._pcm[:_FAKE_ENCODER_SLICE]
-            self._chunks_emitted += 1
-            # Emit a sizeable fragment so the production first-chunk buffer
-            # (TTS_PCM_FIRST_MP3_BYTES) can fill during tests.
-            self._out.put_nowait(b"mp3:" + piece)
+        self.bytes_written += len(data)
+        self._out.put_nowait(data)
 
     async def drain(self) -> None:
         await asyncio.sleep(0)
 
     def close(self) -> None:
-        if self._pcm:
-            piece = bytes(self._pcm)
-            self._pcm.clear()
-            self._chunks_emitted += 1
-            self._out.put_nowait(b"mp3:" + piece)
         self._out.put_nowait(None)
 
     async def wait_closed(self) -> None:
         return None
 
     async def read(self, n: int = -1) -> bytes:
-        # stdout and stderr both use this; stderr drain uses read() without size
-        # after stdin is closed — return empty for stderr-style full reads when
-        # the queue is idle after EOF. Distinguish via n: ffmpeg stdout uses 4096.
         if n == -1:
             return b""
         item = await self._out.get()
@@ -90,16 +72,13 @@ def _make_entity(options: dict | None = None) -> tts.LiquidAiTtsEntity:
     entity._client.synthesize = AsyncMock(return_value=LOUD_WAV)
     entity._synth_semaphore = asyncio.Semaphore(tts.TTS_MAX_CONCURRENT_REQUESTS)
     entity._gap_mp3_cache = {}
-    entity._preamble_mp3_cache = {}
     # ffmpeg is not available in unit tests; tag the output instead.
     entity._ffmpeg_wav = AsyncMock(
         side_effect=lambda wav, *, output_format, streaming=False: (
             f"{output_format}:".encode() + wav[:4] + len(wav).to_bytes(4, "little")
         )
     )
-    entity._spawn_pcm_mp3_encoder = AsyncMock(
-        side_effect=lambda _sr: _FakeEncoderProcess()
-    )
+    entity._spawn_pcm_atempo = AsyncMock(side_effect=lambda _sr: _FakeAtempoProcess())
     return entity
 
 
@@ -270,8 +249,8 @@ async def test_trim_runs_in_executor():
 
 
 @pytest.mark.asyncio
-async def test_stream_pcm_yields_preamble_before_llm_text():
-    """Silent keepalive MP3 must be sent before waiting on the LLM stream."""
+async def test_stream_pcm_yields_header_and_preamble_before_llm_text():
+    """WAV header + silent PCM must open the stream before waiting on the LLM."""
     entity = _make_entity(
         {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
     )
@@ -289,31 +268,30 @@ async def test_stream_pcm_yields_preamble_before_llm_text():
         TTSAudioRequest(message_gen=blocked_message())
     )
     agen = response.data_gen.__aiter__()
+    header = await asyncio.wait_for(agen.__anext__(), timeout=1)
+    assert header.startswith(b"RIFF")
+    assert response.extension == "wav"
     preamble = await asyncio.wait_for(agen.__anext__(), timeout=1)
-    assert preamble.startswith(b"mp3:")
-    assert entity._preamble_mp3_cache
+    assert preamble == audio.make_silence_pcm(24000, tts.TTS_PCM_PREAMBLE_MS)
     # Must not have started Liquid synth yet — LLM text is still blocked.
-    entity._spawn_pcm_mp3_encoder.assert_not_awaited()
     release_text.set()
     rest = await _collect(agen)
     assert rest
-    entity._spawn_pcm_mp3_encoder.assert_awaited()
+    assert any(struct.pack("<h", 20000) in chunk for chunk in rest)
 
 
 @pytest.mark.asyncio
-async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
-    """Continuous ffmpeg encode must emit audio while PCM is still arriving."""
+async def test_stream_pcm_yields_pcm_before_pcm_stream_ends():
+    """PCM frames must be yielded while the WebSocket is still producing audio."""
     entity = _make_entity(
         {"stream_pcm": True, "chunk_gap_ms": 0, "stream_first_chunk_chars": 0}
     )
-    frame = struct.pack("<h", 20000) * 2400  # 100 ms → one fake encoder slice
+    frame = struct.pack("<h", 20000) * 2400  # 100 ms
     released = asyncio.Event()
 
     async def pcm_stream(_text: str):
-        # Two slices (~9.6 KB tagged) fill TTS_PCM_FIRST_MP3_BYTES (8 KB).
         yield frame, 24000
-        yield frame, 24000
-        # Block until the consumer has seen the buffered speech MP3 chunk.
+        # Block until the consumer has seen the first speech PCM chunk.
         await released.wait()
         yield frame, 24000
 
@@ -322,22 +300,20 @@ async def test_stream_pcm_yields_mp3_before_pcm_stream_ends():
         TTSAudioRequest(message_gen=_gen("Hello there."))
     )
 
-    chunks: list[bytes] = []
     agen = response.data_gen.__aiter__()
+    header = await asyncio.wait_for(agen.__anext__(), timeout=1)
+    assert header.startswith(b"RIFF")
     preamble = await asyncio.wait_for(agen.__anext__(), timeout=1)
-    chunks.append(preamble)
+    assert preamble == audio.make_silence_pcm(24000, tts.TTS_PCM_PREAMBLE_MS)
     speech = await asyncio.wait_for(agen.__anext__(), timeout=1)
-    chunks.append(speech)
-    assert len(speech) >= tts.TTS_PCM_FIRST_MP3_BYTES
+    assert speech == frame
     released.set()
-    async for chunk in agen:
-        chunks.append(chunk)
+    rest = await _collect(agen)
+    assert rest == [frame]
 
-    assert response.extension == "mp3"
-    assert len(chunks) >= 3
-    assert all(c.startswith(b"mp3:") for c in chunks)
+    assert response.extension == "wav"
     entity._client.synthesize.assert_not_called()
-    entity._spawn_pcm_mp3_encoder.assert_awaited()
+    entity._spawn_pcm_atempo.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -358,8 +334,12 @@ async def test_stream_pcm_falls_back_to_http_on_error():
     )
     chunks = await _collect(response.data_gen)
 
-    # keepalive preamble + HTTP fallback sentence
-    assert len(chunks) == 2
+    assert response.extension == "wav"
+    assert chunks[0].startswith(b"RIFF")
+    # header + preamble + HTTP fallback PCM
+    assert len(chunks) == 3
+    assert chunks[1] == audio.make_silence_pcm(24000, tts.TTS_PCM_PREAMBLE_MS)
+    assert struct.pack("<h", 20000) in chunks[2]
     entity._client.synthesize.assert_awaited_once_with("Hello.")
 
 
@@ -377,15 +357,68 @@ async def test_stream_pcm_skips_leading_silence():
         yield speech, 24000
 
     entity._client.synthesize_pcm_stream = pcm_stream
-    fake = _FakeEncoderProcess()
-    entity._spawn_pcm_mp3_encoder = AsyncMock(return_value=fake)
 
     response = await entity.async_stream_tts_audio(
         TTSAudioRequest(message_gen=_gen("Hi."))
     )
     chunks = await _collect(response.data_gen)
-    assert len(chunks) >= 2  # preamble + speech
-    # 300 ms speech + ~100 ms keep_edge → four 100 ms encoder slices fed;
-    # leading silence was discarded. First speech MP3 yield is buffered (≥8 KB).
-    assert fake._chunks_emitted == 4
-    assert sum(len(c) for c in chunks[1:]) >= tts.TTS_PCM_FIRST_MP3_BYTES
+    assert chunks[0].startswith(b"RIFF")
+    pcm = b"".join(chunks[1:])
+    # Preamble silence + trimmed speech (keep_edge retained).
+    assert pcm.startswith(audio.make_silence_pcm(24000, tts.TTS_PCM_PREAMBLE_MS))
+    speech_pcm = pcm[len(audio.make_silence_pcm(24000, tts.TTS_PCM_PREAMBLE_MS)) :]
+    assert struct.pack("<h", 20000) in speech_pcm
+    # Leading model silence discarded; keep_edge (~100 ms) + 300 ms speech.
+    assert len(speech_pcm) < len(silence) * 2 + len(speech)
+    assert len(speech_pcm) >= len(speech)
+
+
+@pytest.mark.asyncio
+async def test_stream_pcm_applies_atempo_when_speed_set():
+    entity = _make_entity(
+        {
+            "stream_pcm": True,
+            "chunk_gap_ms": 0,
+            "stream_first_chunk_chars": 0,
+            "speech_speed": 1.25,
+        }
+    )
+    frame = struct.pack("<h", 20000) * 2400
+    fake = _FakeAtempoProcess()
+    entity._spawn_pcm_atempo = AsyncMock(return_value=fake)
+
+    async def pcm_stream(_text: str):
+        yield frame, 24000
+
+    entity._client.synthesize_pcm_stream = pcm_stream
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(message_gen=_gen("Fast."))
+    )
+    chunks = await _collect(response.data_gen)
+
+    assert response.extension == "wav"
+    assert chunks[0].startswith(b"RIFF")
+    entity._spawn_pcm_atempo.assert_awaited_once()
+    # Preamble + speech passed through the fake atempo process.
+    assert fake.bytes_written > len(frame)
+    assert b"".join(chunks[1:])  # sped PCM echoed by fake process
+
+
+@pytest.mark.asyncio
+async def test_stream_pcm_injects_gap_silence():
+    entity = _make_entity(
+        {"stream_pcm": True, "chunk_gap_ms": 5, "stream_first_chunk_chars": 0}
+    )
+    frame = struct.pack("<h", 20000) * 1200
+
+    async def pcm_stream(_text: str):
+        yield frame, 24000
+
+    entity._client.synthesize_pcm_stream = pcm_stream
+    response = await entity.async_stream_tts_audio(
+        TTSAudioRequest(message_gen=_gen("One. Two."))
+    )
+    chunks = await _collect(response.data_gen)
+    gap = audio.make_silence_pcm(24000, 5)
+    assert gap in chunks
+    assert chunks.count(gap) == 1

@@ -28,7 +28,7 @@
           "chunk_gap_ms": "Chunk gap (ms)",
           "silence_threshold": "Silence threshold",
           "stream_first_chunk_chars": "Stream first chunk after (chars)",
-          "stream_pcm": "Stream PCM over WebSocket (faster Assist playback)",
+          "stream_pcm": "Stream WAV over WebSocket (faster Assist playback)",
           "speech_speed": "Speech speed"
         }
       },
@@ -64,7 +64,7 @@
           "chunk_gap_ms": "Chunk gap (ms)",
           "silence_threshold": "Silence threshold",
           "stream_first_chunk_chars": "Stream first chunk after (chars)",
-          "stream_pcm": "Stream PCM over WebSocket (faster Assist playback)",
+          "stream_pcm": "Stream WAV over WebSocket (faster Assist playback)",
           "speech_speed": "Speech speed"
         }
       }

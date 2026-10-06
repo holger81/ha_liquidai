@@ -26,13 +26,13 @@ from .audio import (
     extract_pcm,
     make_silence_pcm,
     pcm_has_signal,
-    pcm_to_wav,
     pop_complete_sentence,
     pop_early_chunk,
     read_sample_rate,
     rebuild_wav,
     sanitize_for_tts,
     split_for_tts,
+    streaming_wav_header,
     trim_leading_pcm_silence,
     trim_pcm_silence,
 )
@@ -62,13 +62,13 @@ from .const import (
     STREAM_FIRST_CHUNK_CHARS,
     SUPPORTED_LANGUAGES,
     TTS_MAX_CONCURRENT_REQUESTS,
-    TTS_PCM_FIRST_MP3_BYTES,
-    TTS_PCM_MP3_BITRATE_K,
     TTS_PCM_PREAMBLE_MS,
 )
 
-# HA converts TTS to mp3 for playback; raw pcm breaks ffmpeg conversion.
-STREAM_EXTENSION = "mp3"
+# Assist streaming: WAV is concat-safe and matches ESPHome's preferred path.
+# HTTP sentence streaming still yields MP3 (one complete file per sentence).
+STREAM_WAV_EXTENSION = "wav"
+STREAM_MP3_EXTENSION = "mp3"
 ONESHOT_EXTENSION = "wav"
 
 
@@ -96,8 +96,6 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self._synth_semaphore = asyncio.Semaphore(TTS_MAX_CONCURRENT_REQUESTS)
         # Encoded inter-sentence silence, keyed by (sample_rate, gap_ms, speed).
         self._gap_mp3_cache: dict[tuple[int, int, float], bytes] = {}
-        # Silent keepalive MP3, keyed by (sample_rate, speed, preamble_ms).
-        self._preamble_mp3_cache: dict[tuple[int, float, int], bytes] = {}
         self._attr_name = "LiquidAI TTS"
         self._attr_unique_id = entry.entry_id
         self._attr_supported_languages = SUPPORTED_LANGUAGES
@@ -194,21 +192,13 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self, request: TTSAudioRequest
     ) -> TTSAudioResponse:
         """Stream TTS audio sentence by sentence."""
-        return TTSAudioResponse(
-            STREAM_EXTENSION,
-            self._audio_gen(request),
-        )
-
-    async def _audio_gen(
-        self, request: TTSAudioRequest
-    ) -> AsyncGenerator[bytes, None]:
-        """Yield mp3 chunks for each completed sentence."""
         if self.stream_pcm:
-            async for chunk in self._audio_gen_pcm(request):
-                yield chunk
-            return
-        async for chunk in self._audio_gen_http(request):
-            yield chunk
+            return TTSAudioResponse(
+                STREAM_WAV_EXTENSION, self._audio_gen_wav(request)
+            )
+        return TTSAudioResponse(
+            STREAM_MP3_EXTENSION, self._audio_gen_http(request)
+        )
 
     async def _audio_gen_http(
         self, request: TTSAudioRequest
@@ -263,67 +253,76 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 if gap_mp3:
                     yield gap_mp3
 
-    async def _audio_gen_pcm(
+    async def _audio_gen_wav(
         self, request: TTSAudioRequest
     ) -> AsyncGenerator[bytes, None]:
-        """WebSocket path: yield MP3 slices as PCM frames arrive per sentence."""
-        # Keepalive: Assist satellites often time out if the HTTP body stays
-        # empty while the LLM produces the first sentence / Liquid warms up.
-        preamble = await self._silent_mp3_preamble()
-        if preamble:
-            yield preamble
+        """WebSocket path: one streaming WAV (header + raw PCM) for Assist.
 
+        HA concatenates yielded chunks and converts once. Raw PCM frames are
+        concat-safe; stitched MP3 files were not.
+        """
         sample_rate = DEFAULT_SAMPLE_RATE
-        template_wav = pcm_to_wav(b"\x00\x00", sample_rate=sample_rate)
-        first_sentence = True
+        # Open the media body immediately so Assist does not time out while the
+        # LLM produces the first sentence / LiquidAI warms up.
+        yield streaming_wav_header(sample_rate)
 
-        async for sentence in self._message_to_sentences(request.message_gen):
-            if not first_sentence and self.chunk_gap_ms > 0:
-                gap_mp3 = await self._gap_mp3(template_wav, sample_rate)
-                if gap_mp3:
-                    yield gap_mp3
-            first_sentence = False
+        async def raw_pcm() -> AsyncGenerator[bytes, None]:
+            if TTS_PCM_PREAMBLE_MS > 0:
+                yield make_silence_pcm(sample_rate, TTS_PCM_PREAMBLE_MS)
 
-            yielded = False
-            try:
-                async for mp3 in self._stream_sentence_mp3(sentence):
-                    yielded = True
-                    yield mp3
-            except HomeAssistantError as err:
-                if yielded:
-                    # Avoid re-synthesizing a sentence the satellite already started.
-                    LOGGER.warning(
-                        "PCM stream failed mid-sentence after playback started: %s",
-                        err,
-                    )
-                    raise
-                LOGGER.warning(
-                    "PCM stream failed for sentence, falling back to HTTP: %s",
-                    err,
-                )
-                wav = await self._client.synthesize(sentence)
-                sample_rate = read_sample_rate(wav)
-                template_wav = wav
-                mp3 = await self._trim_and_encode(wav)
-                if mp3:
-                    yield mp3
+            first_sentence = True
+            async for sentence in self._message_to_sentences(request.message_gen):
+                if not first_sentence and self.chunk_gap_ms > 0:
+                    yield make_silence_pcm(sample_rate, self.chunk_gap_ms)
+                first_sentence = False
 
-    async def _stream_sentence_mp3(
+                async for pcm in self._sentence_pcm_bytes(sentence):
+                    if pcm:
+                        yield pcm
+
+        if self.speech_speed == 1.0:
+            async for pcm in raw_pcm():
+                yield pcm
+            return
+
+        async for pcm in self._atempo_pcm_stream(raw_pcm(), sample_rate):
+            yield pcm
+
+    async def _sentence_pcm_bytes(
         self, text: str
     ) -> AsyncGenerator[bytes, None]:
-        """Yield MP3 as PCM arrives, using one continuous ffmpeg encode.
+        """Yield PCM for one sentence, with HTTP fallback on WS failure."""
+        yielded = False
+        try:
+            async for pcm in self._stream_sentence_pcm(text):
+                yielded = True
+                yield pcm
+        except HomeAssistantError as err:
+            if yielded:
+                # Avoid re-synthesizing a sentence the satellite already started.
+                LOGGER.warning(
+                    "PCM stream failed mid-sentence after playback started: %s",
+                    err,
+                )
+                raise
+            LOGGER.warning(
+                "PCM stream failed for sentence, falling back to HTTP: %s",
+                err,
+            )
+            wav = await self._client.synthesize(text)
+            trimmed = await self._run_blocking(self._trimmed_wav, wav)
+            if trimmed:
+                yield extract_pcm(trimmed)
 
-        HA concatenates yielded chunks into one media stream. Separate MP3
-        *files* per slice (each with its own encoder delay) click/warble when
-        joined. A single ffmpeg process fed raw s16le PCM produces one
-        continuous MP3 bitstream that can be yielded in fragments safely.
-        """
+    async def _stream_sentence_pcm(
+        self, text: str
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield raw s16le PCM frames for one sentence, skipping lead-in silence."""
         pcm_agen = self._client.synthesize_pcm_stream(text).__aiter__()
         pending: bytearray = bytearray()
         sample_rate = DEFAULT_SAMPLE_RATE
         max_leading = DEFAULT_SAMPLE_RATE * 2 * 2
 
-        # Wait for speech before starting the encoder (skip model lead-in).
         while True:
             try:
                 pcm, sample_rate = await pcm_agen.__anext__()
@@ -344,20 +343,30 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             if len(pending) >= max_leading:
                 pending.clear()
 
-        # int16 alignment — odd lengths corrupt the encoder mid-stream.
         if len(pending) & 1:
             pending = pending[:-1]
+        if pending:
+            yield bytes(pending)
 
-        process = await self._spawn_pcm_mp3_encoder(sample_rate)
+        async for pcm, _sr in pcm_agen:
+            if not pcm:
+                continue
+            if len(pcm) & 1:
+                pcm = pcm[:-1]
+            if pcm:
+                yield pcm
+
+    async def _atempo_pcm_stream(
+        self, pcm_agen: AsyncGenerator[bytes, None], sample_rate: int
+    ) -> AsyncGenerator[bytes, None]:
+        """Apply speech_speed via one continuous ffmpeg atempo pass."""
+        process = await self._spawn_pcm_atempo(sample_rate)
         assert process.stdin is not None
         assert process.stdout is not None
 
         async def _write_pcm() -> None:
             try:
-                if pending:
-                    process.stdin.write(bytes(pending))
-                    await process.stdin.drain()
-                async for pcm, _sr in pcm_agen:
+                async for pcm in pcm_agen:
                     if not pcm:
                         continue
                     if len(pcm) & 1:
@@ -371,25 +380,12 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                     await process.stdin.wait_closed()
 
         writer = asyncio.create_task(_write_pcm())
-        first_buf = bytearray()
-        yielded = False
         try:
             while True:
                 chunk = await process.stdout.read(4096)
                 if not chunk:
                     break
-                if not yielded:
-                    first_buf.extend(chunk)
-                    if len(first_buf) < TTS_PCM_FIRST_MP3_BYTES:
-                        continue
-                    yield bytes(first_buf)
-                    first_buf.clear()
-                    yielded = True
-                else:
-                    yield chunk
-            if first_buf:
-                yield bytes(first_buf)
-                yielded = True
+                yield chunk
             await writer
             stderr = (
                 await process.stderr.read() if process.stderr is not None else b""
@@ -398,10 +394,8 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             if code:
                 detail = stderr.decode(errors="replace").strip()
                 raise HomeAssistantError(
-                    f"ffmpeg PCM→MP3 stream failed: {detail or code}"
+                    f"ffmpeg PCM atempo failed: {detail or code}"
                 )
-            if not yielded:
-                raise HomeAssistantError("ffmpeg PCM→MP3 stream returned no audio")
         except Exception:
             if not writer.done():
                 writer.cancel()
@@ -411,10 +405,10 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 process.kill()
             raise
 
-    async def _spawn_pcm_mp3_encoder(
+    async def _spawn_pcm_atempo(
         self, sample_rate: int
     ) -> asyncio.subprocess.Process:
-        """Start ffmpeg reading raw s16le mono PCM and writing an MP3 stream."""
+        """Start ffmpeg reading/writing raw s16le mono with atempo."""
         ffmpeg_manager = ffmpeg.get_ffmpeg_manager(self.hass)
         command = [
             ffmpeg_manager.binary,
@@ -429,22 +423,12 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
             "1",
             "-i",
             "pipe:0",
+            "-filter:a",
+            f"atempo={self.speech_speed}",
+            "-f",
+            "s16le",
+            "pipe:1",
         ]
-        if self.speech_speed != 1.0:
-            command.extend(["-filter:a", f"atempo={self.speech_speed}"])
-        # CBR: Assist satellites / some HA transcoder paths fail intermittently
-        # on VBR (-q:a). flush_packets keeps time-to-first-audio low.
-        command.extend(
-            [
-                "-f",
-                "mp3",
-                "-b:a",
-                f"{TTS_PCM_MP3_BITRATE_K}k",
-                "-flush_packets",
-                "1",
-                "pipe:1",
-            ]
-        )
         return await asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
@@ -470,20 +454,6 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         gap_mp3 = await self._convert_wav_to_mp3(gap_wav, streaming=True)
         self._gap_mp3_cache[key] = gap_mp3
         return gap_mp3
-
-    async def _silent_mp3_preamble(self) -> bytes:
-        """Return a short silent MP3 used to open the Assist media stream."""
-        key = (DEFAULT_SAMPLE_RATE, self.speech_speed, TTS_PCM_PREAMBLE_MS)
-        cached = self._preamble_mp3_cache.get(key)
-        if cached is not None:
-            return cached
-        wav = pcm_to_wav(
-            make_silence_pcm(DEFAULT_SAMPLE_RATE, TTS_PCM_PREAMBLE_MS),
-            sample_rate=DEFAULT_SAMPLE_RATE,
-        )
-        mp3 = await self._convert_wav_to_mp3(wav, streaming=True)
-        self._preamble_mp3_cache[key] = mp3
-        return mp3
 
     def _trimmed_wav(self, wav: bytes) -> bytes:
         """Return a trimmed WAV buffer."""

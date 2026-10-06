@@ -160,27 +160,28 @@ def is_wav(audio_bytes: bytes) -> bool:
     )
 
 
-def pcm_to_wav(
-    pcm: bytes,
+def wav_header(
     *,
     sample_rate: int,
+    data_size: int,
     channels: int = 1,
     bit_rate: int = 16,
 ) -> bytes:
-    """Wrap raw PCM samples in a WAV container."""
+    """Build a WAV ``fmt``+``data`` header for the given PCM size."""
     if bit_rate != 16:
-        raise ValueError("Only 16-bit PCM is supported for ASR")
+        raise ValueError("Only 16-bit PCM is supported")
     if channels < 1:
         raise ValueError("At least one channel is required")
 
     bytes_per_sample = bit_rate // 8
     block_align = channels * bytes_per_sample
     byte_rate = sample_rate * block_align
-    data_size = len(pcm)
-    header = struct.pack(
+    # Clamp RIFF size to 32-bit; streaming uses data_size=0xFFFFFFFF.
+    riff_size = min(36 + data_size, 0xFFFFFFFF)
+    return struct.pack(
         "<4sI4s4sIHHIIHH4sI",
         b"RIFF",
-        36 + data_size,
+        riff_size,
         b"WAVE",
         b"fmt ",
         16,
@@ -193,7 +194,37 @@ def pcm_to_wav(
         b"data",
         data_size,
     )
-    return header + pcm
+
+
+def streaming_wav_header(
+    sample_rate: int,
+    *,
+    channels: int = 1,
+    bit_rate: int = 16,
+) -> bytes:
+    """WAV header for a live stream whose total PCM size is not yet known."""
+    return wav_header(
+        sample_rate=sample_rate,
+        data_size=0xFFFFFFFF,
+        channels=channels,
+        bit_rate=bit_rate,
+    )
+
+
+def pcm_to_wav(
+    pcm: bytes,
+    *,
+    sample_rate: int,
+    channels: int = 1,
+    bit_rate: int = 16,
+) -> bytes:
+    """Wrap raw PCM samples in a WAV container."""
+    return wav_header(
+        sample_rate=sample_rate,
+        data_size=len(pcm),
+        channels=channels,
+        bit_rate=bit_rate,
+    ) + pcm
 
 
 def read_sample_rate(wav_bytes: bytes) -> int:
