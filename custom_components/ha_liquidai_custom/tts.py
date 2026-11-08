@@ -10,6 +10,7 @@ from typing import Any
 
 from homeassistant.components import ffmpeg
 from homeassistant.components.tts import (
+    ATTR_PREFERRED_FORMAT,
     TextToSpeechEntity,
     TTSAudioRequest,
     TTSAudioResponse,
@@ -100,6 +101,14 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         self._attr_unique_id = entry.entry_id
         self._attr_supported_languages = SUPPORTED_LANGUAGES
         self._attr_default_language = DEFAULT_LANGUAGE
+        # The Assist pipeline defaults TTS output to mp3, which makes Home
+        # Assistant ffmpeg-transcode our stream before the panel can play it.
+        # Declaring preferred_format as supported and defaulting it to "wav"
+        # lets the native WAV stream pass through untouched, so clients can
+        # start playback while audio is still being generated.
+        if self.stream_pcm:
+            self._attr_supported_options = [ATTR_PREFERRED_FORMAT]
+            self._attr_default_options = {ATTR_PREFERRED_FORMAT: STREAM_WAV_EXTENSION}
 
     @property
     def max_chunk_len(self) -> int:

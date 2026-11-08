@@ -488,3 +488,25 @@ async def test_stream_pcm_injects_gap_silence():
     gap = audio.make_silence_pcm(24000, 5)
     assert gap in chunks
     assert chunks.count(gap) == 1
+
+
+def test_stream_pcm_advertises_wav_preferred_format():
+    entity = tts.LiquidAiTtsEntity(
+        make_hass(),
+        ConfigEntry(
+            data={"base_url": "http://example:8811"}, options={"stream_pcm": True}
+        ),
+    )
+    assert entity._attr_supported_options == ["preferred_format"]
+    assert entity._attr_default_options == {"preferred_format": "wav"}
+
+
+def test_http_stream_advertises_no_preferred_format():
+    entity = tts.LiquidAiTtsEntity(
+        make_hass(),
+        ConfigEntry(
+            data={"base_url": "http://example:8811"}, options={"stream_pcm": False}
+        ),
+    )
+    assert getattr(entity, "_attr_supported_options", None) is None
+    assert getattr(entity, "_attr_default_options", None) is None

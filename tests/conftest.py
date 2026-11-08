@@ -290,6 +290,7 @@ def install_ha_stubs() -> None:
     _module("homeassistant.components.diagnostics", async_redact_data=_redact)
     _module(
         "homeassistant.components.tts",
+        ATTR_PREFERRED_FORMAT="preferred_format",
         TextToSpeechEntity=TextToSpeechEntity,
         TTSAudioRequest=TTSAudioRequest,
         TTSAudioResponse=TTSAudioResponse,
