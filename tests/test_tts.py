@@ -107,14 +107,29 @@ async def test_message_to_sentences_emits_early_chunk_then_sentences():
     entity = _make_entity({"stream_first_chunk_chars": 10})
     sentences = await _collect(
         entity._message_to_sentences(
-            _gen("Turning on the kitchen ", "lights now. Anything else?")
+            _gen(
+                "Turning on the kitchen lights, ",
+                "and the blinds now. Anything else?",
+            )
         )
     )
-    assert sentences[0].startswith("Turning on")
+    assert sentences[0] == "Turning on the kitchen lights,"
     assert sentences[-1] == "Anything else?"
     assert " ".join(sentences).replace("  ", " ") == (
-        "Turning on the kitchen lights now. Anything else?"
+        "Turning on the kitchen lights, and the blinds now. Anything else?"
     )
+
+
+@pytest.mark.asyncio
+async def test_message_to_sentences_waits_for_sentence_without_clause_break():
+    """No comma in the window: the first chunk waits for the full sentence."""
+    entity = _make_entity({"stream_first_chunk_chars": 10})
+    sentences = await _collect(
+        entity._message_to_sentences(
+            _gen("Turning on the kitchen ", "lights now. Bye.")
+        )
+    )
+    assert sentences == ["Turning on the kitchen lights now.", "Bye."]
 
 
 @pytest.mark.asyncio

@@ -107,21 +107,36 @@ def test_pop_complete_sentence_skips_abbreviation() -> None:
     assert remainder == " Then go"
 
 
-def test_pop_early_chunk() -> None:
-    chunk, remainder = pop_early_chunk("Hello world this is a long buffer", 12)
-    assert chunk == "Hello world this is a long"
-    assert remainder == "buffer"
+def test_pop_early_chunk_breaks_at_clause_punctuation() -> None:
+    chunk, remainder = pop_early_chunk("Hello world, this is a long buffer", 12)
+    assert chunk == "Hello world,"
+    assert remainder == "this is a long buffer"
+
+
+def test_pop_early_chunk_waits_without_clause_break() -> None:
+    """A mid-phrase cut sounds choppy, so no comma means no early chunk."""
+    assert pop_early_chunk("Hello world this is a long buffer", 12) == (
+        None,
+        "Hello world this is a long buffer",
+    )
+
+
+def test_pop_early_chunk_ignores_break_before_min_window() -> None:
+    assert pop_early_chunk("Hi, hello world this is long", 20) == (
+        None,
+        "Hi, hello world this is long",
+    )
 
 
 def test_pop_early_chunk_keeps_word_separator_at_buffer_end() -> None:
     """Trailing whitespace must survive so the next delta starts a new word."""
-    chunk, remainder = pop_early_chunk("Turning on the kitchen ", 10)
-    assert chunk == "Turning on the"
-    assert remainder == "kitchen "
+    chunk, remainder = pop_early_chunk("Turning on the kitchen, ", 10)
+    assert chunk == "Turning on the kitchen,"
+    assert remainder == ""
 
-    chunk, remainder = pop_early_chunk("Turning on the kitchen", 10)
-    assert chunk == "Turning on the"
-    assert remainder == "kitchen"
+    chunk, remainder = pop_early_chunk("Turning on the kitchen, now", 10)
+    assert chunk == "Turning on the kitchen,"
+    assert remainder == "now"
 
 
 def test_pcm_has_signal_detects_loud_samples() -> None:

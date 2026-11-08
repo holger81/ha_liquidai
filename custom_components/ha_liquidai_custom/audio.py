@@ -129,25 +129,34 @@ def pop_complete_sentence(
     return sentence, buffer[end:]
 
 
+_CLAUSE_BREAKS = ",;:—–"  # noqa: RUF001  (em/en dashes are intentional)
+
+
 def pop_early_chunk(buffer: str, min_chars: int) -> tuple[str | None, str]:
-    """Pop a speakable prefix once the buffer reaches min_chars."""
+    """Pop a speakable prefix at a clause boundary once min_chars is reached.
+
+    Only breaks where a speaker would naturally pause (comma, semicolon,
+    colon, dash) inside the window. A mid-phrase cut makes the model speak
+    the fragment with sentence-final intonation and the continuation
+    restarts the voice, which sounds like an artificial pause; returning
+    ``(None, buffer)`` lets the caller wait for the full sentence instead.
+    """
     plain = buffer.lstrip()
     text = plain.rstrip()
     if len(text) < min_chars:
         return None, buffer
 
-    break_at = min_chars
-    if len(text) > min_chars:
-        space = text.rfind(" ", 0, min(min_chars + 30, len(text)))
-        if space >= min_chars // 2:
-            break_at = space
+    window = text[: min_chars + 30]
+    break_at = max(window.rfind(ch) for ch in _CLAUSE_BREAKS)
+    if break_at < min_chars // 2:
+        return None, buffer
 
-    chunk = text[:break_at].strip()
+    chunk = text[: break_at + 1].strip()
     if not chunk:
         return None, buffer
     # Slice the un-rstripped text so trailing whitespace survives; otherwise
     # the next streamed delta glues onto the last word ("kitchen" + "lights").
-    remainder = plain[break_at:].lstrip()
+    remainder = plain[break_at + 1 :].lstrip()
     return chunk, remainder
 
 

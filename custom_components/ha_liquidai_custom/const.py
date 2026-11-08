@@ -52,7 +52,10 @@ SILENCE_THRESHOLD = 350
 DEFAULT_SPEECH_SPEED = 1.0
 MIN_SPEECH_SPEED = 0.75
 MAX_SPEECH_SPEED = 1.5
-STREAM_FIRST_CHUNK_CHARS = 15
+# 0 = wait for a complete sentence before the first TTS request. A non-zero
+# value fires the first chunk early, but only at a clause boundary (comma,
+# semicolon, colon, dash) so speech is never cut mid-phrase.
+STREAM_FIRST_CHUNK_CHARS = 0
 DEFAULT_STREAM_PCM = True
 DEFAULT_SAMPLE_RATE = 24000
 # Short silent PCM after the streaming WAV header so Assist opens the media
