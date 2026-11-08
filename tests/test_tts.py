@@ -149,6 +149,47 @@ async def test_message_to_sentences_sanitizes_markdown():
 
 
 @pytest.mark.asyncio
+async def test_message_to_chunks_packs_short_sentences_into_one_chunk():
+    """A short answer shares one realtime session: continuous prosody."""
+    entity = _make_entity({"stream_first_chunk_chars": 0, "max_chunk_len": 300})
+    chunks = await _collect(
+        entity._message_to_chunks(_gen("The lights are on. ", "The door is locked."))
+    )
+    assert chunks == ["The lights are on. The door is locked."]
+
+
+@pytest.mark.asyncio
+async def test_message_to_chunks_starts_new_chunk_at_limit():
+    entity = _make_entity({"stream_first_chunk_chars": 0, "max_chunk_len": 12})
+    chunks = await _collect(entity._message_to_chunks(_gen("AAAA. BBBB. CCCC. DDDD.")))
+    # "AAAA. BBBB." is 11 chars; adding " CCCC." would exceed 12.
+    assert chunks == ["AAAA. BBBB.", "CCCC. DDDD."]
+
+
+@pytest.mark.asyncio
+async def test_message_to_chunks_passes_oversized_sentence_through():
+    """The server splits oversized generations itself; never cut mid-sentence."""
+    long_sentence = ("Word " * 30).strip() + "."
+    entity = _make_entity({"stream_first_chunk_chars": 0, "max_chunk_len": 40})
+    chunks = await _collect(entity._message_to_chunks(_gen(long_sentence)))
+    assert len(chunks) == 1
+    assert chunks[0] == long_sentence
+
+
+@pytest.mark.asyncio
+async def test_message_to_chunks_emits_early_first_chunk_immediately():
+    """stream_first_chunk_chars > 0 keeps its low-latency first emission."""
+    entity = _make_entity({"stream_first_chunk_chars": 10, "max_chunk_len": 300})
+    chunks = await _collect(
+        entity._message_to_chunks(
+            _gen("Turning on the kitchen lights, ", "and the blinds now. Bye.")
+        )
+    )
+    assert chunks[0] == "Turning on the kitchen lights,"
+    assert chunks[-1] == "and the blinds now. Bye."
+
+
+@pytest.mark.asyncio
 async def test_oneshot_single_chunk_returns_wav():
     entity = _make_entity()
     extension, data = await entity.async_get_tts_audio("Hello there.", "en-US", {})
@@ -200,7 +241,10 @@ async def test_oneshot_empty_message_returns_none():
 
 @pytest.mark.asyncio
 async def test_stream_yields_mp3_per_sentence_and_caches_gap():
-    entity = _make_entity({"chunk_gap_ms": 5, "stream_first_chunk_chars": 0})
+    # max_chunk_len=1 keeps one sentence per chunk (the pre-packing behaviour).
+    entity = _make_entity(
+        {"chunk_gap_ms": 5, "stream_first_chunk_chars": 0, "max_chunk_len": 1}
+    )
     request = TTSAudioRequest(message_gen=_gen("One. Two. ", "Three."))
 
     response = await entity.async_stream_tts_audio(request)
@@ -228,7 +272,9 @@ async def test_stream_yields_mp3_per_sentence_and_caches_gap():
 
 @pytest.mark.asyncio
 async def test_stream_without_gap_skips_gap_encoding():
-    entity = _make_entity({"chunk_gap_ms": 0, "stream_first_chunk_chars": 0})
+    entity = _make_entity(
+        {"chunk_gap_ms": 0, "stream_first_chunk_chars": 0, "max_chunk_len": 1}
+    )
     request = TTSAudioRequest(message_gen=_gen("One. Two."))
 
     response = await entity.async_stream_tts_audio(request)
@@ -422,7 +468,12 @@ async def test_stream_pcm_applies_atempo_when_speed_set():
 @pytest.mark.asyncio
 async def test_stream_pcm_injects_gap_silence():
     entity = _make_entity(
-        {"stream_pcm": True, "chunk_gap_ms": 5, "stream_first_chunk_chars": 0}
+        {
+            "stream_pcm": True,
+            "chunk_gap_ms": 5,
+            "stream_first_chunk_chars": 0,
+            "max_chunk_len": 1,
+        }
     )
     frame = struct.pack("<h", 20000) * 1200
 

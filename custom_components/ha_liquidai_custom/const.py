@@ -45,7 +45,10 @@ EMBED_ENDPOINT_MISSING_STATUSES = frozenset({404, 405, 501})
 # only queue up and risk timeouts.
 TTS_MAX_CONCURRENT_REQUESTS = 2
 
-MAX_CHUNK_LEN = 160
+# Sentences are greedily packed into chunks of this size so a whole short
+# Assist answer shares one realtime TTS session (continuous prosody, no
+# seams). The realtime endpoint verified clean up to ~330 chars.
+MAX_CHUNK_LEN = 300
 KEEP_EDGE_MS = 100
 CHUNK_GAP_MS = 5
 SILENCE_THRESHOLD = 350

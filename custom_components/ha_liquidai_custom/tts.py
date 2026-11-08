@@ -203,8 +203,8 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
     async def _audio_gen_http(
         self, request: TTSAudioRequest
     ) -> AsyncGenerator[bytes, None]:
-        """HTTP path: wait for each full WAV, prefetch the next sentence."""
-        sentence_iter = self._message_to_sentences(request.message_gen).__aiter__()
+        """HTTP path: wait for each full WAV, prefetch the next chunk."""
+        sentence_iter = self._message_to_chunks(request.message_gen).__aiter__()
         template_wav: bytes | None = None
         sample_rate: int | None = None
 
@@ -271,7 +271,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                 yield make_silence_pcm(sample_rate, TTS_PCM_PREAMBLE_MS)
 
             first_sentence = True
-            async for sentence in self._message_to_sentences(request.message_gen):
+            async for sentence in self._message_to_chunks(request.message_gen):
                 if not first_sentence and self.chunk_gap_ms > 0:
                     yield make_silence_pcm(sample_rate, self.chunk_gap_ms)
                 first_sentence = False
@@ -291,7 +291,7 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
     async def _sentence_pcm_bytes(
         self, text: str
     ) -> AsyncGenerator[bytes, None]:
-        """Yield PCM for one sentence, with HTTP fallback on WS failure."""
+        """Yield PCM for one chunk, with HTTP fallback on WS failure."""
         yielded = False
         try:
             async for pcm in self._stream_sentence_pcm(text):
@@ -567,3 +567,36 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
         if tail:
             LOGGER.debug("Streaming tail sentence (%d chars)", len(tail))
             yield tail
+
+    async def _message_to_chunks(
+        self, message_gen: AsyncGenerator[str, None]
+    ) -> AsyncGenerator[str, None]:
+        """Convert a text stream into chunks of at most ``max_chunk_len``.
+
+        Complete sentences are greedily packed so a short answer goes to one
+        realtime TTS session: the model then speaks across sentence
+        boundaries with continuous prosody instead of restarting its voice
+        per sentence. A new chunk starts only when the next sentence would
+        exceed the limit (the server degrades past ~330 chars per
+        generation).
+        """
+        max_len = self.max_chunk_len
+        # stream_first_chunk_chars exists to start audio before the first
+        # sentence completes; packing it into a bigger chunk would undo that.
+        emit_first_now = self.stream_first_chunk_chars > 0
+        pending = ""
+        async for sentence in self._message_to_sentences(message_gen):
+            if emit_first_now and not pending:
+                emit_first_now = False
+                LOGGER.debug("Streaming first chunk (%d chars)", len(sentence))
+                yield sentence
+                continue
+            if pending and len(pending) + 1 + len(sentence) > max_len:
+                LOGGER.debug("Streaming chunk (%d chars)", len(pending))
+                yield pending
+                pending = sentence
+            else:
+                pending = f"{pending} {sentence}" if pending else sentence
+        if pending:
+            LOGGER.debug("Streaming chunk (%d chars)", len(pending))
+            yield pending
