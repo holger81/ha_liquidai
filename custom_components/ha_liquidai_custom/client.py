@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
@@ -166,6 +167,9 @@ class LiquidAiClient:
             raise HomeAssistantError("No speakable text for TTS")
 
         url = self._ws_audio_url()
+        started = time.monotonic()
+        total_bytes = 0
+        saw_done = False
         try:
             async with self._session.ws_connect(
                 url,
@@ -191,12 +195,14 @@ class LiquidAiClient:
                                     "LiquidAI TTS stream returned invalid audio"
                                 ) from err
                             if pcm:
+                                total_bytes += len(pcm)
                                 sample_rate = int(
                                     payload.get("sample_rate") or DEFAULT_SAMPLE_RATE
                                 )
                                 yield pcm, sample_rate
                         elif kind == "done":
-                            return
+                            saw_done = True
+                            break
                         elif kind == "error":
                             detail = str(payload.get("data") or "unknown error")
                             raise HomeAssistantError(
@@ -207,7 +213,7 @@ class LiquidAiClient:
                         aiohttp.WSMsgType.CLOSING,
                         aiohttp.WSMsgType.CLOSED,
                     ):
-                        return
+                        break
                     elif msg.type == aiohttp.WSMsgType.ERROR:
                         raise HomeAssistantError(
                             f"LiquidAI TTS WebSocket error: {websocket.exception()}"
@@ -215,7 +221,26 @@ class LiquidAiClient:
         except TimeoutError as err:
             raise HomeAssistantError("LiquidAI TTS stream timed out") from err
         except aiohttp.ClientError as err:
-            raise HomeAssistantError(f"LiquidAI TTS stream failed: {err}") from err
+            raise HomeAssistantError(f"LiquidAI TTS stream failed: {err}")
+        elapsed = time.monotonic() - started
+        seconds = total_bytes / (DEFAULT_SAMPLE_RATE * 2)
+        if saw_done:
+            LOGGER.info(
+                "TTS stream complete: %d PCM bytes (%.2f s audio) in %.2f s for %d chars",
+                total_bytes,
+                seconds,
+                elapsed,
+                len(text),
+            )
+        else:
+            LOGGER.warning(
+                "TTS stream closed before done: %d PCM bytes (%.2f s audio) in %.2f s "
+                "for %d chars",
+                total_bytes,
+                seconds,
+                elapsed,
+                len(text),
+            )
 
     async def transcribe(
         self,

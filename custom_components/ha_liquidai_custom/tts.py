@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -289,13 +290,27 @@ class LiquidAiTtsEntity(TextToSpeechEntity):
                     if pcm:
                         yield pcm
 
-        if self.speech_speed == 1.0:
-            async for pcm in raw_pcm():
-                yield pcm
-            return
+        total = 0
+        started = time.monotonic()
+        try:
+            if self.speech_speed == 1.0:
+                async for pcm in raw_pcm():
+                    total += len(pcm)
+                    yield pcm
+                return
 
-        async for pcm in self._atempo_pcm_stream(raw_pcm(), sample_rate):
-            yield pcm
+            async for pcm in self._atempo_pcm_stream(raw_pcm(), sample_rate):
+                total += len(pcm)
+                yield pcm
+        finally:
+            # Also runs when HA abandons this generator early (GeneratorExit),
+            # which is how a dropped tail would show up on the HA side.
+            LOGGER.info(
+                "TTS WAV stream yielded %d PCM bytes (%.2f s) in %.2f s",
+                total,
+                total / (sample_rate * 2),
+                time.monotonic() - started,
+            )
 
     async def _sentence_pcm_bytes(
         self, text: str
