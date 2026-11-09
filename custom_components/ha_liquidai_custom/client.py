@@ -221,12 +221,13 @@ class LiquidAiClient:
         except TimeoutError as err:
             raise HomeAssistantError("LiquidAI TTS stream timed out") from err
         except aiohttp.ClientError as err:
-            raise HomeAssistantError(f"LiquidAI TTS stream failed: {err}")
+            raise HomeAssistantError(f"LiquidAI TTS stream failed: {err}") from err
         elapsed = time.monotonic() - started
         seconds = total_bytes / (DEFAULT_SAMPLE_RATE * 2)
         if saw_done:
             LOGGER.info(
-                "TTS stream complete: %d PCM bytes (%.2f s audio) in %.2f s for %d chars",
+                "TTS stream complete: %d PCM bytes (%.2f s audio) in %.2f s "
+                "for %d chars",
                 total_bytes,
                 seconds,
                 elapsed,
